@@ -1,6 +1,6 @@
 module github.com/edwinsyarief/teishoku
 
-go 1.25.4
+go 1.26.0
 
 require github.com/pkg/profile v1.7.0
 
