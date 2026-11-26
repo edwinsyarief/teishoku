@@ -1,450 +1,224 @@
 package teishoku
 
-import (
-	"reflect"
-	"unsafe"
-)
-
-// Filter provides a fast, cache-friendly iterator over all entities that have a
-// specific set of components. It is the primary mechanism for implementing
-// game logic (systems). The filter iterates directly over the component arrays
-// within matching archetypes, providing maximum performance.
-type Filter[T any] struct {
-	curBase      unsafe.Pointer
-	curEntityIDs []Entity
-	queryCache
-	curMatchIdx int // index into matchingArches
-	curIdx      int // index into the current archetype's entity/component array
-	compSize    uintptr
-	curArchSize int
-	compID      uint8
-}
-
-// NewFilter creates a new `Filter` that iterates over all entities possessing
-// at least the component of type `T`. The filter automatically discovers and
-// caches the archetypes that match this component signature.
-//
-// Parameters:
-//   - w: The World to query.
-//
-// Returns:
-//   - A pointer to the newly created `Filter[T]`.
-func NewFilter[T any](w *World) *Filter[T] {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	id := w.getCompTypeID(reflect.TypeFor[T]())
-	var m bitmask256
-	m.set(id)
-	f := &Filter[T]{
-		queryCache:  newQueryCache(w, m),
-		compID:      id,
-		curMatchIdx: 0,
-		curIdx:      -1,
-	}
-	f.compSize = w.components.compIDToSize[id]
-	f.updateMatching()
-	f.updateCachedEntities()
-	f.doReset()
-	return f
-}
-
-// New is a convenience method that constructs a new `Filter` instance for the
-// same component type, equivalent to calling `NewFilter`.
-func (f *Filter[T]) New(w *World) *Filter[T] {
-	return NewFilter[T](w)
-}
-
-// Reset rewinds the filter's iterator to the beginning. It must be called
-// before re-iterating over a filter (e.g., in a loop). The filter will also
-// automatically detect if new archetypes have been created since the last
-// iteration and update its internal list accordingly.
-func (f *Filter[T]) Reset() {
-	f.world.mu.RLock()
-	defer f.world.mu.RUnlock()
-	f.doReset()
-}
-
-func (f *Filter[T]) doReset() {
-	if f.isArchetypeStale() {
-		f.updateMatching()
-	}
-	f.curMatchIdx = 0
-	f.curIdx = -1
-	if len(f.matchingArches) > 0 {
-		a := f.matchingArches[0]
-		f.curBase = a.compPointers[f.compID]
-		f.curEntityIDs = a.entityIDs
-		f.curArchSize = a.size
-	} else {
-		f.curArchSize = 0
-	}
-}
-
-// Next advances the filter to the next matching entity. It returns true if an
-// entity was found, and false if the iteration is complete. This method must
-// be called before accessing the entity or its components.
-//
-// Example:
-//
-//	query := teishoku.NewFilter[Position](world)
-//	for query.Next() {
-//	    // ... process entity
-//	}
-//
-// Returns:
-//   - true if another matching entity was found, false otherwise.
-func (f *Filter[T]) Next() bool {
-	f.curIdx++
-	if f.curIdx < f.curArchSize {
-		return true
-	}
-	return f.nextArchetype()
-}
-
-func (f *Filter[T]) nextArchetype() bool {
-	f.curMatchIdx++
-	if f.curMatchIdx >= len(f.matchingArches) {
-		return false
-	}
-	a := f.matchingArches[f.curMatchIdx]
-	f.curBase = a.compPointers[f.compID]
-	f.curEntityIDs = a.entityIDs
-	f.curArchSize = a.size
-	f.curIdx = 0
-	return true
-}
-
-// Entity returns the current `Entity` in the iteration. This should only be
-// called after `Next()` has returned true.
-//
-// Returns:
-//   - The current Entity.
-func (f *Filter[T]) Entity() Entity {
-	return f.curEntityIDs[f.curIdx]
-}
-
-// Get returns a pointer to the component of type `T` for the current entity
-// in the iteration. This should only be called after `Next()` has returned true.
-//
-// Returns:
-//   - A pointer to the component data (*T).
-func (f *Filter[T]) Get() *T {
-	return (*T)(unsafe.Add(f.curBase, uintptr(f.curIdx)*f.compSize))
-}
-
-// RemoveEntities efficiently removes all entities that match the filter's
-// query. This operation is performed in a batch, invalidating all matching
-// entities and recycling their IDs without moving any memory, making it highly
-// performant for clearing large groups of entities.
-//
-// After this operation, the filter will be empty.
-func (f *Filter[T]) RemoveEntities() {
-	f.world.mu.Lock()
-	defer f.world.mu.Unlock()
-	if f.IsStale() {
-		f.updateMatching()
-	}
-	for _, a := range f.matchingArches {
-		for i := 0; i < a.size; i++ {
-			ent := a.entityIDs[i]
-			meta := &f.world.entities.metas[ent.ID]
-			meta.archetypeIndex = -1
-			meta.index = -1
-			meta.version = 0
-			f.world.entities.freeIDs = append(f.world.entities.freeIDs, ent.ID)
-		}
-		a.size = 0
-	}
-	f.world.mutationVersion.Add(1)
-	f.doReset()
-}
-
-// Entities returns a slice containing all entities that match the filter's
-// query. This method retrieves a cached list of entities, which is updated only
-// when the filter is reset or detects that the world's archetypes have changed.
-//
-// The returned slice is owned by the filter and will be invalidated if the
-// world is modified (e.g., by creating or deleting entities) or when the filter
-// is reset. If you need to retain the list of entities for long-term use, make
-// a copy of the slice.
-//
-// Returns:
-//   - A slice of matching entities.
-func (f *Filter[T]) Entities() []Entity {
-	return f.queryCache.Entities()
-}
-
-// Query returns a new iterator snapshot for the filter, optimized for allocation-free iteration.
-// Assume no world mutations during the Query's lifetime.
-type Query[T any] struct {
-	matchingArches []*archetype
-	curBase        unsafe.Pointer
-	curEntityIDs   []Entity
-	curMatchIdx    int
-	curIdx         int
-	compSize       uintptr
-	curArchSize    int
-	compID         uint8
-}
-
-// Query creates a new Query iterator from the Filter.
-func (f *Filter[T]) Query() Query[T] {
-	f.world.mu.RLock()
-	defer f.world.mu.RUnlock()
-	if f.isArchetypeStale() {
-		f.updateMatching()
-	}
-	q := Query[T]{
-		matchingArches: f.matchingArches, // share, no alloc
-		compID:         f.compID,
-		compSize:       f.compSize,
-		curMatchIdx:    0,
-		curIdx:         -1,
-	}
-	if len(q.matchingArches) > 0 {
-		a := q.matchingArches[0]
-		q.curBase = a.compPointers[q.compID]
-		q.curEntityIDs = a.entityIDs
-		q.curArchSize = a.size
-	} else {
-		q.curArchSize = 0
-	}
-	return q
-}
-
-// Next advances the query to the next matching entity.
-func (q *Query[T]) Next() bool {
-	q.curIdx++
-	if q.curIdx < q.curArchSize {
-		return true
-	}
-	return q.nextArchetype()
-}
-
-func (q *Query[T]) nextArchetype() bool {
-	q.curMatchIdx++
-	if q.curMatchIdx >= len(q.matchingArches) {
-		return false
-	}
-	a := q.matchingArches[q.curMatchIdx]
-	q.curBase = a.compPointers[q.compID]
-	q.curEntityIDs = a.entityIDs
-	q.curArchSize = a.size
-	q.curIdx = 0
-	return true
-}
-
-// Entity returns the current entity in the query.
-func (q *Query[T]) Entity() Entity {
-	return q.curEntityIDs[q.curIdx]
-}
-
-// Get returns a pointer to the component T for the current entity.
-func (q *Query[T]) Get() *T {
-	return (*T)(unsafe.Add(q.curBase, uintptr(q.curIdx)*q.compSize))
-}
-
-// Filter0 provides a fast, cache-friendly iterator over all entities that have a
-// no components.
+// Filter0 matches all entities that currently possess zero components, with
+// optional exclusion support.
 type Filter0 struct {
-	curEntityIDs []Entity
-	queryCache
-	curMatchIdx int // index into matchingArches
-	curIdx      int // index into the current archetype's entity/component array
-	curArchSize int
+	filterBase
+	matched []*archetype
 }
 
-// NewFilter0 creates a new `Filter` that iterates over all entities possessing
-// no components.
-//
-// Parameters:
-//   - w: The World to query.
-//
-// Returns:
-//   - A pointer to the newly created `Filter0`.
+// NewFilter0 creates a Filter0 matching entities with no components in World w.
 func NewFilter0(w *World) *Filter0 {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	var m bitmask256
 	f := &Filter0{
-		queryCache:  newQueryCache(w, m),
-		curMatchIdx: 0,
-		curIdx:      -1,
+		filterBase: filterBase{
+			world: w,
+		},
 	}
-	f.updateMatching()
-	f.updateCachedEntities()
-	f.doReset()
+	f.sync()
 	return f
 }
 
-// New is a convenience method that constructs a new `Filter` instance for the
-// same component type, equivalent to calling `NewFilter`.
-func (f *Filter0) New(w *World) *Filter0 {
-	return NewFilter0(w)
-}
-
-// Reset rewinds the filter's iterator to the beginning. It must be called
-// before re-iterating over a filter (e.g., in a loop). The filter will also
-// automatically detect if new archetypes have been created since the last
-// iteration and update its internal list accordingly.
-func (f *Filter0) Reset() {
-	f.world.mu.RLock()
-	defer f.world.mu.RUnlock()
-	f.doReset()
-}
-
-func (f *Filter0) doReset() {
-	if f.isArchetypeStale() {
-		f.updateMatching()
+func (f *Filter0) sync() {
+	arches := f.world.archetypes
+	for i := f.lastArchIdx; i < len(arches); i++ {
+		a := arches[i]
+		if f.matches(a) {
+			f.matched = append(f.matched, a)
+		}
 	}
-	f.curMatchIdx = 0
-	f.curIdx = -1
-	if len(f.matchingArches) > 0 {
-		a := f.matchingArches[0]
-		f.curEntityIDs = a.entityIDs
-		f.curArchSize = a.size
-	} else {
-		f.curArchSize = 0
+	f.lastArchIdx = len(arches)
+}
+
+func (f *Filter0) addExclude(id uint8) {
+	f.exclude.set(id)
+	f.matched = f.matched[:0]
+	f.lastArchIdx = 0
+	f.cachedEntities = nil
+	f.sync()
+}
+
+// Without excludes entities possessing any of compIDs from matching this
+// filter and returns the filter for chaining.
+func (f *Filter0) Without(compIDs ...uint8) *Filter0 {
+	if len(compIDs) == 0 {
+		return f
+	}
+	for _, id := range compIDs {
+		f.exclude.set(id)
+	}
+	f.matched = f.matched[:0]
+	f.lastArchIdx = 0
+	f.cachedEntities = nil
+	f.sync()
+	return f
+}
+
+// Count returns the total number of entities currently matching the filter.
+func (f *Filter0) Count() int {
+	if len(f.world.archetypes) != f.lastArchIdx {
+		f.sync()
+	}
+	total := 0
+	for _, a := range f.matched {
+		total += a.size
+	}
+	return total
+}
+
+// Entities returns a cached slice of all entities currently matching the
+// filter. The slice is lazily built and reused across calls while the world
+// has not mutated.
+func (f *Filter0) Entities() []Entity {
+	if len(f.world.archetypes) != f.lastArchIdx {
+		f.sync()
+	}
+	if f.cachedEntities == nil || f.lastMutationVersion != f.world.mutationVersion {
+		total := 0
+		for _, a := range f.matched {
+			total += a.size
+		}
+		if cap(f.cachedEntities) < total {
+			f.cachedEntities = make([]Entity, total)
+		} else {
+			f.cachedEntities = f.cachedEntities[:total]
+		}
+		idx := 0
+		for _, a := range f.matched {
+			if a.size == 0 {
+				continue
+			}
+			copy(f.cachedEntities[idx:idx+a.size], a.entityIDs[:a.size])
+			idx += a.size
+		}
+		f.lastMutationVersion = f.world.mutationVersion
+	}
+	return f.cachedEntities
+}
+
+// RemoveEntities removes all entities matching the filter from the world.
+func (f *Filter0) RemoveEntities() {
+	if len(f.world.archetypes) != f.lastArchIdx {
+		f.sync()
+	}
+	for _, a := range f.matched {
+		if a.size > 0 {
+			f.world.removeAllInArch(a)
+		}
 	}
 }
 
-// Next advances the filter to the next matching entity. It returns true if an
-// entity was found, and false if the iteration is complete. This method must
-// be called before accessing the entity or its components.
-//
-// Example:
-//
-//	query := teishoku.NewFilter0(world)
-//	for query.Next() {
-//	    // ... process entity
-//	}
-//
-// Returns:
-//   - true if another matching entity was found, false otherwise.
-func (f *Filter0) Next() bool {
-	f.curIdx++
-	if f.curIdx < f.curArchSize {
+// EachChunk invokes fn once per non-empty matching archetype with its entity
+// slice.
+func (f *Filter0) EachChunk(fn func([]Entity)) {
+	if len(f.world.archetypes) != f.lastArchIdx {
+		f.sync()
+	}
+	for _, a := range f.matched {
+		if a.size == 0 {
+			continue
+		}
+		fn(a.entityIDs[:a.size])
+	}
+}
+
+// Chunks0 iterates over non-empty matching archetype chunks for Filter0.
+type Chunks0 struct {
+	matched  []*archetype
+	matchIdx int
+	cur      *archetype
+}
+
+// Chunks returns a Chunks0 iterator over matching archetypes.
+func (f *Filter0) Chunks() Chunks0 {
+	if len(f.world.archetypes) != f.lastArchIdx {
+		f.sync()
+	}
+	return Chunks0{
+		matched:  f.matched,
+		matchIdx: -1,
+	}
+}
+
+// Next advances to the next non-empty matching archetype chunk.
+func (c *Chunks0) Next() bool {
+	for {
+		c.matchIdx++
+		if c.matchIdx >= len(c.matched) {
+			return false
+		}
+		a := c.matched[c.matchIdx]
+		if a.size == 0 {
+			continue
+		}
+		c.cur = a
 		return true
 	}
-	return f.nextArchetype()
 }
 
-func (f *Filter0) nextArchetype() bool {
-	f.curMatchIdx++
-	if f.curMatchIdx >= len(f.matchingArches) {
-		return false
-	}
-	a := f.matchingArches[f.curMatchIdx]
-	f.curEntityIDs = a.entityIDs
-	f.curArchSize = a.size
-	f.curIdx = 0
-	return true
+// Entities returns the contiguous slice of entities in the current chunk.
+func (c *Chunks0) Entities() []Entity {
+	return c.cur.entityIDs[:c.cur.size]
 }
 
-// Entity returns the current `Entity` in the iteration. This should only be
-// called after `Next()` has returned true.
-//
-// Returns:
-//   - The current Entity.
-func (f *Filter0) Entity() Entity {
-	return f.curEntityIDs[f.curIdx]
-}
-
-// RemoveEntities efficiently removes all entities that match the filter's
-// query. This operation is performed in a batch, invalidating all matching
-// entities and recycling their IDs without moving any memory, making it highly
-// performant for clearing large groups of entities.
-//
-// After this operation, the filter will be empty.
-func (f *Filter0) RemoveEntities() {
-	f.world.mu.Lock()
-	defer f.world.mu.Unlock()
-	if f.IsStale() {
-		f.updateMatching()
-	}
-	for _, a := range f.matchingArches {
-		for i := 0; i < a.size; i++ {
-			ent := a.entityIDs[i]
-			meta := &f.world.entities.metas[ent.ID]
-			meta.archetypeIndex = -1
-			meta.index = -1
-			meta.version = 0
-			f.world.entities.freeIDs = append(f.world.entities.freeIDs, ent.ID)
-		}
-		a.size = 0
-	}
-	f.world.mutationVersion.Add(1)
-	f.doReset()
-}
-
-// Entities returns a slice containing all entities that match the filter's
-// query. This method retrieves a cached list of entities, which is updated only
-// when the filter is reset or detects that the world's archetypes have changed.
-//
-// The returned slice is owned by the filter and will be invalidated if the
-// world is modified (e.g., by creating or deleting entities) or when the filter
-// is reset. If you need to retain the list of entities for long-term use, make
-// a copy of the slice.
-//
-// Returns:
-//   - A slice of matching entities.
-func (f *Filter0) Entities() []Entity {
-	return f.queryCache.Entities()
-}
-
-// Query0 is an allocation-free iterator snapshot for Filter0.
+// Query0 is an allocation-free per-entity iterator snapshot for Filter0.
 type Query0 struct {
-	matchingArches []*archetype
-	curEntityIDs   []Entity
-	curMatchIdx    int
-	curIdx         int
-	curArchSize    int
+	matched  []*archetype
+	entities []Entity
+	matchIdx int
+	idx      int
+	archSize int
 }
 
-// Query returns a new Query0 iterator from the Filter0.
+// Query returns a Query0 iterator for Filter0.
 func (f *Filter0) Query() Query0 {
-	f.world.mu.RLock()
-	defer f.world.mu.RUnlock()
-	if f.isArchetypeStale() {
-		f.updateMatching()
+	if len(f.world.archetypes) != f.lastArchIdx {
+		f.sync()
 	}
 	q := Query0{
-		matchingArches: f.matchingArches,
-		curMatchIdx:    0,
-		curIdx:         -1,
+		matched: f.matched,
 	}
-	if len(q.matchingArches) > 0 {
-		a := q.matchingArches[0]
-		q.curEntityIDs = a.entityIDs
-		q.curArchSize = a.size
+	if len(f.matched) > 0 && f.matched[0].size > 0 {
+		a := f.matched[0]
+		q.entities = a.entityIDs
+		q.archSize = a.size
+		q.matchIdx = 0
+		q.idx = -1
 	} else {
-		q.curArchSize = 0
+		q.matchIdx = -1
+		q.idx = 0
+		q.archSize = 0
 	}
 	return q
 }
 
 // Next advances the query to the next matching entity.
 func (q *Query0) Next() bool {
-	q.curIdx++
-	if q.curIdx < q.curArchSize {
+	q.idx++
+	if q.idx < q.archSize {
 		return true
 	}
 	return q.nextArchetype()
 }
 
+//go:noinline
 func (q *Query0) nextArchetype() bool {
-	q.curMatchIdx++
-	if q.curMatchIdx >= len(q.matchingArches) {
-		return false
+	for {
+		q.matchIdx++
+		if q.matchIdx >= len(q.matched) {
+			return false
+		}
+		a := q.matched[q.matchIdx]
+		if a.size == 0 {
+			continue
+		}
+		q.entities = a.entityIDs
+		q.archSize = a.size
+		q.idx = 0
+		return true
 	}
-	a := q.matchingArches[q.curMatchIdx]
-	q.curEntityIDs = a.entityIDs
-	q.curArchSize = a.size
-	q.curIdx = 0
-	return true
 }
 
 // Entity returns the current entity in the query.
 func (q *Query0) Entity() Entity {
-	return q.curEntityIDs[q.curIdx]
+	return q.entities[q.idx]
 }

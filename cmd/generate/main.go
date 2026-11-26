@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"go/format"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,232 +11,146 @@ import (
 	"text/template"
 )
 
-// ComponentInfo holds all the variable names for a single component,
-// making it easy to use in templates. For a component `T1`, it generates
-// corresponding variable names like `v1`, `id1`, `size1`, etc., which are used
-// to build the generated Go code.
+// ComponentInfo holds the template identifiers for a single generic component
+// parameter (1-based Index for Builder fields/vars, 0-based ZeroIndex for Filter).
 type ComponentInfo struct {
-	TypeName       string // e.g., T1, T2
-	VarName        string // e.g., v1, v2
-	SetVarName     string // e.g., v1, v2
-	BuilderVarName string // e.g., comp1, comp2
-	IDName         string // e.g., id1, id2
-	SizeName       string // e.g., size1, size2
-	OKName         string // e.g., ok1, ok2
-	SlotName       string // e.g., slot1, slot2
-	BytesName      string // e.g., bytes1, bytes2
-	SrcName        string // e.g., src1, src2
-	BaseName       string // e.g., base1, base2
-	StrideName     string // e.g., stride1, stride2
-	PtrName        string // e.g., p1, p2
-	Index          int    // The 1-based index of the component (1, 2, ...)
+	TypeName  string // e.g., T1, T2
+	VarName   string // e.g., v1, v2
+	IDName    string // e.g., id1, id2
+	Index     int    // 1-based index (1..N)
+	ZeroIndex int    // 0-based index (0..N-1)
 }
 
-// TemplateData holds all the placeholders for a single N-ary function variant.
-// For a given number of components `N`, it aggregates all the necessary string
-// fragments (like type lists, variable declarations, and return types) needed
-// to generate the corresponding Go functions (e.g., `NewBuilderN`, `FilterN`).
+// TemplateData aggregates all rendered signature and expression snippets for
+// generating N-ary Builder and Filter implementations.
 type TemplateData struct {
-	// Generic type parameters, e.g., "T1 any, T2 any"
-	Types string
-	// Type names without "any", e.g., "T1, T2"
-	TypeVars string
-	// Variable declarations, e.g., "v1 T1, v2 T2"
-	Vars string
-	// Builder-specific variable declarations, e.g., "comp1 T1, comp2 T2"
-	BuilderVars string
-	// Component ID variable names, e.g., "id1, id2"
-	IDs string
-	// Condition to check if all component lookups were successful, e.g., "!ok1 || !ok2"
-	OKIDs string
-	// Condition to check for duplicate component types, e.g., "id1 == id2 || id1 == id3"
-	DuplicateIDs string
-	// Return types for functions, e.g., "*T1, *T2"
-	ReturnTypes string
-	// Return types for single pointer returns, e.g., "*T1, *T2"
-	ReturnSinglePtrs string
-	// Casting pointers for returns, e.g., "(*T1)(p1), (*T2)(p2)"
-	ReturnPtrs string
-	// Variable names for return values, e.g., "c1, c2"
-	ReturnVars string
-	// Nil return values, e.g., "nil, nil"
-	ReturnNil string
-	// Condition for checking component slots, e.g., "slot1 == -1 || slot2 == -1"
-	SlotCheckCondition string
-	// Batch result types, e.g., "[]*T1, []*T2"
-	BatchRes string
-	// Batch result return variables, e.g., "res1, res2"
-	ReturnBatchRes string
-	// Casting pointers from byte slices for returns
-	ReturnPtrsFromBytes string
-	// Bitmask check condition for filters
-	MaskCheck string
-	// Bitmask check condition for builders
-	BuilderMaskCheck string
-	// Boolean check for having all components
-	HasAll string
-	// Boolean check for having none of the components
-	HasNone string
-	// Condition to check if a component ID is one being removed
-	IsRemovedID string
-	// Variable declarations for Set method, e.g., "v1 T1, v2 T2"
-	SetVars string
-	// Variable names for Set method, e.g., "v1, v2"
-	SetVarNames string
-	// Boolean check for having all components in Set method
-	SetHasVars string
-	// Detailed information for each component
-	Components []ComponentInfo
-	// The number of components this data is for (e.g., 2 for Filter2)
-	N int
+	Types        string          // e.g., "T1 any, T2 any"
+	TypeVars     string          // e.g., "T1, T2"
+	Vars         string          // e.g., "v1 T1, v2 T2"
+	VarNames     string          // e.g., "v1, v2"
+	IDs          string          // e.g., "id1, id2"
+	DuplicateIDs string          // e.g., "id2 == id1"
+	ReturnTypes  string          // e.g., "*T1, *T2"
+	ReturnNil    string          // e.g., "nil, nil"
+	SliceTypes   string          // e.g., "[]T1, []T2"
+	CompIdxCheck string          // e.g., "c1 < 0 || c2 < 0"
+	Suffix       string          // "" for N=1, "2".."8" for N>=2
+	Components   []ComponentInfo // ordered component descriptors
+	N            int             // arity (1..maxN)
 }
 
-// main is the entry point for the code generation script. It reads template
-// files from the `templates` directory, populates them with data for a
-// specified range of component counts (N), and writes the generated Go code
-// to the project's root directory.
-//
-// By default, it generates code for N=2 to N=6. This can be overridden by
-// providing a number as a command-line argument.
 func main() {
-	// The maximum number of components to generate functions for.
-	maxN := 6
+	maxN := 8
 	if len(os.Args) > 1 {
 		n, err := strconv.Atoi(os.Args[1])
-		if err != nil {
+		if err != nil || n < 1 {
 			fmt.Println("Invalid number provided:", os.Args[1])
 			os.Exit(1)
 		}
 		maxN = n
 	}
 
-	// List of templates to process.
-	templates := []string{"builder_generated.go.tpl", "functions_generated.go.tpl", "filter_generated.go.tpl"}
+	templates := []string{"builder_generated.go.tpl", "filter_generated.go.tpl"}
 	templateDir := "templates"
-	outputDir := "." // Write to the package root.
+	outputDir := "."
 
-	fmt.Printf("Generating code for N=2 to %d...\n", maxN)
+	fmt.Printf("Generating code for N=1 to %d...\n", maxN)
 
 	for _, tplFile := range templates {
 		tplPath := filepath.Join(templateDir, tplFile)
 		outPath := filepath.Join(outputDir, strings.TrimSuffix(tplFile, ".tpl"))
-
-		// Create the output file.
-		outFile, err := os.Create(outPath)
-		if err != nil {
+		if err := generateFile(tplPath, outPath, maxN); err != nil {
 			panic(err)
-		}
-		defer outFile.Close()
-
-		// Write the standard "do not edit" header to the generated file.
-		//_, _ = outFile.WriteString("// Code generated by go generate; DO NOT EDIT.\n")
-		_, _ = outFile.WriteString("package teishoku\n\n")
-		_, _ = outFile.WriteString("import (\n\t\"reflect\"\n\t\"unsafe\"\n)\n\n")
-
-		// Parse the template file.
-		tpl, err := template.ParseFiles(tplPath)
-		if err != nil {
-			panic(err)
-		}
-
-		// Execute the template for each value of N from 2 to maxN.
-		for i := 2; i <= maxN; i++ {
-			data := buildTemplateData(i)
-			var buf bytes.Buffer
-			err := tpl.Execute(&buf, data)
-			if err != nil {
-				panic(fmt.Sprintf("Error executing template %s for N=%d: %v", tplFile, i, err))
-			}
-			// Write the generated code to the output file.
-			_, _ = outFile.Write(buf.Bytes())
-			_, _ = outFile.WriteString("\n")
 		}
 	}
 	fmt.Println("Code generation complete.")
 }
 
-// buildTemplateData constructs the TemplateData struct for a given number of
-// components, `n`. It programmatically generates all the string snippets
-// (e.g., function signatures, parameter lists, loop conditions) that are
-// injected into the Go templates.
+func generateFile(tplPath, outPath string, maxN int) error {
+	tpl, err := template.ParseFiles(tplPath)
+	if err != nil {
+		return fmt.Errorf("parse template %s: %w", tplPath, err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("// Code generated by go generate; DO NOT EDIT.\n\n")
+	buf.WriteString("package teishoku\n\n")
+	buf.WriteString("import \"unsafe\"\n\n")
+
+	for i := 1; i <= maxN; i++ {
+		data := buildTemplateData(i)
+		if err := tpl.Execute(&buf, data); err != nil {
+			return fmt.Errorf("execute template %s for N=%d: %w", tplPath, i, err)
+		}
+		buf.WriteByte('\n')
+	}
+
+	formatted, err := format.Source(buf.Bytes())
+	if err != nil {
+		return fmt.Errorf("format generated %s: %w\n%s", outPath, err, buf.String())
+	}
+
+	if err := os.WriteFile(outPath, formatted, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", outPath, err)
+	}
+	return nil
+}
+
 func buildTemplateData(n int) TemplateData {
 	components := make([]ComponentInfo, n)
-	var types, typeVars, vars, builderVars, ids, okIDs, returnTypes, returnSinglePtrs, returnPtrs, returnVars, returnNil, slotCheck, batchRes, returnBatchRes, returnFromBytes []string
-	var duplicateIDs, maskChecks, builderMaskChecks, hasAll, hasNone, isRemovedIDs, setVars, setVarNames, setHasVars []string
+	types := make([]string, 0, n)
+	typeVars := make([]string, 0, n)
+	vars := make([]string, 0, n)
+	varNames := make([]string, 0, n)
+	ids := make([]string, 0, n)
+	returnTypes := make([]string, 0, n)
+	returnNil := make([]string, 0, n)
+	sliceTypes := make([]string, 0, n)
+	compIdxCheck := make([]string, 0, n)
+	var duplicateIDs []string
+
 	for i := 1; i <= n; i++ {
 		is := strconv.Itoa(i)
 		ci := ComponentInfo{
-			Index:          i,
-			TypeName:       "T" + is,
-			VarName:        "v" + is,
-			SetVarName:     "v" + is,
-			BuilderVarName: "comp" + is,
-			IDName:         "id" + is,
-			SizeName:       "size" + is,
-			OKName:         "ok" + is,
-			SlotName:       "slot" + is,
-			BytesName:      "bytes" + is,
-			SrcName:        "src" + is,
-			BaseName:       "base" + is,
-			StrideName:     "stride" + is,
-			PtrName:        "ptr" + is,
+			Index:     i,
+			ZeroIndex: i - 1,
+			TypeName:  "T" + is,
+			VarName:   "v" + is,
+			IDName:    "id" + is,
 		}
 		components[i-1] = ci
 		types = append(types, ci.TypeName+" any")
 		typeVars = append(typeVars, ci.TypeName)
 		vars = append(vars, ci.VarName+" "+ci.TypeName)
-		builderVars = append(builderVars, ci.BuilderVarName+" "+ci.TypeName)
+		varNames = append(varNames, ci.VarName)
 		ids = append(ids, ci.IDName)
-		okIDs = append(okIDs, "!"+ci.OKName)
 		returnTypes = append(returnTypes, "*"+ci.TypeName)
-		returnSinglePtrs = append(returnSinglePtrs, "*"+ci.TypeName)
-		returnPtrs = append(returnPtrs, "(*"+ci.TypeName+")("+ci.PtrName+")")
-		returnVars = append(returnVars, ci.VarName)
 		returnNil = append(returnNil, "nil")
-		slotCheck = append(slotCheck, ci.SlotName+" == -1")
-		batchRes = append(batchRes, "[]*"+ci.TypeName)
-		returnBatchRes = append(returnBatchRes, "res"+is)
-		returnFromBytes = append(returnFromBytes, "(*"+ci.TypeName+")(unsafe.Pointer(&"+ci.BytesName+"[meta.Index*"+ci.SizeName+"]))")
-		maskChecks = append(maskChecks, fmt.Sprintf("(a.mask[i%s]&(uint64(1)<<uint64(o%s))) == 0", is, is))
-		builderMaskChecks = append(builderMaskChecks, fmt.Sprintf("(a.mask[i%s]&(uint64(1)<<uint64(o%s))) == 0", is, is))
-		hasAll = append(hasAll, "has"+is)
-		hasNone = append(hasNone, "!has"+is)
-		isRemovedIDs = append(isRemovedIDs, "cid == id"+is)
+		sliceTypes = append(sliceTypes, "[]"+ci.TypeName)
+		compIdxCheck = append(compIdxCheck, "c"+is+" < 0")
 		for j := 1; j < i; j++ {
-			js := strconv.Itoa(j)
-			duplicateIDs = append(duplicateIDs, "id"+is+" == id"+js)
+			duplicateIDs = append(duplicateIDs, "id"+is+" == id"+strconv.Itoa(j))
 		}
-		setVars = append(setVars, ci.SetVarName+" "+ci.TypeName)
-		setVarNames = append(setVarNames, ci.SetVarName)
-		setHasVars = append(setHasVars, "has"+is)
+	}
+
+	suffix := ""
+	if n >= 2 {
+		suffix = strconv.Itoa(n)
 	}
 
 	return TemplateData{
-		N:                   n,
-		Components:          components,
-		Types:               strings.Join(types, ", "),
-		TypeVars:            strings.Join(typeVars, ", "),
-		Vars:                strings.Join(vars, ", "),
-		BuilderVars:         strings.Join(builderVars, ", "),
-		IDs:                 strings.Join(ids, ", "),
-		OKIDs:               strings.Join(okIDs, " || "),
-		DuplicateIDs:        strings.Join(duplicateIDs, " || "),
-		ReturnTypes:         strings.Join(returnTypes, ", "),
-		ReturnSinglePtrs:    strings.Join(returnSinglePtrs, ", "),
-		ReturnPtrs:          strings.Join(returnPtrs, ", "),
-		ReturnVars:          strings.Join(returnVars, ", "),
-		ReturnNil:           strings.Join(returnNil, ", "),
-		SlotCheckCondition:  strings.Join(slotCheck, " || "),
-		BatchRes:            strings.Join(batchRes, ", "),
-		ReturnBatchRes:      strings.Join(returnBatchRes, ", "),
-		ReturnPtrsFromBytes: strings.Join(returnFromBytes, ", "),
-		MaskCheck:           strings.Join(maskChecks, " || "),
-		BuilderMaskCheck:    strings.Join(builderMaskChecks, " || "),
-		HasAll:              strings.Join(hasAll, " && "),
-		HasNone:             strings.Join(hasNone, " && "),
-		IsRemovedID:         strings.Join(isRemovedIDs, " || "),
-		SetVars:             strings.Join(setVars, ", "),
-		SetVarNames:         strings.Join(setVarNames, ", "),
-		SetHasVars:          strings.Join(setHasVars, " && "),
+		N:            n,
+		Suffix:       suffix,
+		Components:   components,
+		Types:        strings.Join(types, ", "),
+		TypeVars:     strings.Join(typeVars, ", "),
+		Vars:         strings.Join(vars, ", "),
+		VarNames:     strings.Join(varNames, ", "),
+		IDs:          strings.Join(ids, ", "),
+		DuplicateIDs: strings.Join(duplicateIDs, " || "),
+		ReturnTypes:  strings.Join(returnTypes, ", "),
+		ReturnNil:    strings.Join(returnNil, ", "),
+		SliceTypes:   strings.Join(sliceTypes, ", "),
+		CompIdxCheck: strings.Join(compIdxCheck, " || "),
 	}
 }

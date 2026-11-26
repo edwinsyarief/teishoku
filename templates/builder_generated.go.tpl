@@ -1,236 +1,294 @@
-// Builder{{.N}} provides a highly efficient, type-safe API for creating entities
-// with a predefined set of {{.N}} components: {{.TypeVars}}.
-type Builder{{.N}}[{{.Types}}] struct {
-	world *World
-	arch  *archetype
-	{{range .Components}}id{{.Index}}   uint8
-	{{end}}
+// Builder{{.Suffix}} provides a type-safe, zero-allocation API for creating,
+// querying, modifying, and removing entities with components {{.TypeVars}}.
+type Builder{{.Suffix}}[{{.Types}}] struct {
+	world       *World
+	arch        *archetype
+	lastAddSrc  *archetype
+	lastAddEdge *transitionEdge
+	lastRemSrc  *archetype
+	lastRemEdge *transitionEdge
+	mask        bitmask256
+	{{- range .Components}}
+	id{{.Index}}      uint8
+	{{- end}}
+	{{- range .Components}}
+	archCol{{.Index}} uint8
+	{{- end}}
+	lastAddCols [{{.N}}]uint8
 }
 
-// NewBuilder{{.N}} creates a new `Builder` for entities with the {{.N}} components
-// {{.TypeVars}}. It pre-calculates and caches the archetype for peak
-// performance.
-//
-// Parameters:
-//   - w: The World in which to create entities.
-//
-// Returns:
-//   - A pointer to the configured `Builder{{.N}}`.
-func NewBuilder{{.N}}[{{.Types}}](w *World) *Builder{{.N}}[{{.TypeVars}}] {
-	{{range .Components}}t{{.Index}} := reflect.TypeFor[{{.TypeName}}]()
-	{{end}}
-	w.components.mu.RLock()
-	{{range .Components}}id{{.Index}} := w.getCompTypeIDNoLock(t{{.Index}})
-	{{end}}
-	w.components.mu.RUnlock()
-
+// NewBuilder{{.Suffix}} creates a Builder{{.Suffix}} bound to World w for
+// components {{.TypeVars}}.
+{{- if gt .N 1}}
+// Panics if any component types resolve to the same component ID.
+{{- end}}
+func NewBuilder{{.Suffix}}[{{.Types}}](w *World) *Builder{{.Suffix}}[{{.TypeVars}}] {
+	{{- range .Components}}
+	id{{.Index}} := ComponentID[{{.TypeName}}](w)
+	{{- end}}
+	{{- if gt .N 1}}
 	if {{.DuplicateIDs}} {
-		panic("ecs: duplicate component types in Builder{{.N}}")
+		panic("teishoku: duplicate component types in Builder{{.Suffix}}")
 	}
+	{{- end}}
 	var mask bitmask256
-	{{range .Components}}mask.set(id{{.Index}})
-	{{end}}
-	w.components.mu.RLock()
-	specs := []compSpec{
-		{{range .Components}}{id: id{{.Index}}, typ: t{{.Index}}, size: w.components.compIDToSize[id{{.Index}}]},
-		{{end}}
+	{{- range .Components}}
+	mask.set(id{{.Index}})
+	{{- end}}
+	compIDs := []uint8{ {{.IDs}} }
+	arch := w.getOrCreateArchetype(mask, compIDs)
+	return &Builder{{.Suffix}}[{{.TypeVars}}]{
+		world: w,
+		arch:  arch,
+		mask:  mask,
+		{{- range .Components}}
+		id{{.Index}}:      id{{.Index}},
+		archCol{{.Index}}: uint8(arch.compIdx[id{{.Index}}]),
+		{{- end}}
 	}
-	w.components.mu.RUnlock()
-	arch := w.getOrCreateArchetype(mask, specs)
-	return &Builder{{.N}}[{{.TypeVars}}]{world: w, arch: arch, {{range $i, $e := .Components}}{{if $i}}, {{end}}id{{$e.Index}}: id{{$e.Index}}{{end}}}
 }
 
-// New is a convenience method that constructs a new `Builder` instance for the
-// same component types, equivalent to calling `NewBuilder{{.N}}`.
-func (b *Builder{{.N}}[{{.TypeVars}}]) New(w *World) *Builder{{.N}}[{{.TypeVars}}] {
-	return NewBuilder{{.N}}[{{.TypeVars}}](w)
+// NewEntity creates a single new entity with the builder's components.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) NewEntity() Entity {
+	e, _ := b.world.createEntityInArch(b.arch)
+	return e
 }
 
-// NewEntity creates a single new entity with the {{.N}} components defined by the
-// builder: {{.TypeVars}}. This method is highly optimized and should not cause
-// any garbage collection overhead.
-//
-// Returns:
-//   - The newly created Entity.
-func (b *Builder{{.N}}[{{.TypeVars}}]) NewEntity() Entity {
-	return b.world.createEntity(b.arch)
+// NewEntityWith creates a single new entity and initializes its components to
+// the provided values.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) NewEntityWith({{.Vars}}) Entity {
+	e, row := b.world.createEntityInArch(b.arch)
+	{{- range .Components}}
+	var z{{.Index}} {{.TypeName}}
+	if unsafe.Sizeof(z{{.Index}}) > 0 {
+		*(*{{.TypeName}})(unsafe.Add(b.arch.columns[b.archCol{{.Index}}].data, uintptr(row)*unsafe.Sizeof(z{{.Index}}))) = v{{.Index}}
+	}
+	{{- end}}
+	return e
 }
 
-// NewEntities creates a batch of `count` entities with the {{.N}} components
-// defined by the builder. This is the most performant method for creating many
-// entities at once. This method does not return the created entities to avoid
-// allocations. Use a `Filter` to query for and initialize them afterward.
-//
-// Parameters:
-//   - count: The number of entities to create.
-func (b *Builder{{.N}}[{{.TypeVars}}]) NewEntities(count int) {
-	if count == 0 {
+// NewEntities creates count new entities with the builder's components.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) NewEntities(count int) {
+	b.world.createEntitiesInArch(b.arch, count)
+}
+
+// NewEntitiesWith creates count new entities and initializes all of their
+// components to the provided values.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) NewEntitiesWith(count int, {{.Vars}}) {
+	startRow := b.world.createEntitiesInArch(b.arch, count)
+	if startRow < 0 {
 		return
 	}
-	w := b.world
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	a := b.arch
-	for len(w.entities.freeIDs) < count {
-		w.expand()
+	{{- range .Components}}
+	var z{{.Index}} {{.TypeName}}
+	if unsafe.Sizeof(z{{.Index}}) > 0 {
+		s{{.Index}} := unsafe.Slice((*{{.TypeName}})(b.arch.columns[b.archCol{{.Index}}].data), startRow+count)[startRow:]
+		for i := range s{{.Index}} {
+			s{{.Index}}[i] = v{{.Index}}
+		}
 	}
-	startSize := a.size
-	a.size += count
-	popped := w.entities.freeIDs[len(w.entities.freeIDs)-count:]
-	w.entities.freeIDs = w.entities.freeIDs[:len(w.entities.freeIDs)-count]
-	for k := 0; k < count; k++ {
-		id := popped[k]
-		meta := &w.entities.metas[id]
-		meta.archetypeIndex = a.index
-		meta.index = startSize + k
-		meta.version = w.entities.nextEntityVer
-		ent := Entity{ID: id, Version: meta.version}
-		a.entityIDs[startSize+k] = ent
-		w.entities.nextEntityVer++
-	}
-	w.mutationVersion.Add(1)
+	{{- end}}
 }
 
-// NewEntitiesWithValueSet creates a batch of `count` entities and initializes
-// their components to the provided values.
-//
-// Parameters:
-//   - count: The number of entities to create.
-{{range .Components}}//   - comp{{.Index}}: The initial value for the component {{.TypeName}}.
-{{end}}func (b *Builder{{.N}}[{{.TypeVars}}]) NewEntitiesWithValueSet(count int, {{.BuilderVars}}) {
-	if count == 0 {
-		return
-	}
+// Get returns pointers to the builder's components for entity e, or nils if e
+// is invalid or missing any of the components.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) Get(e Entity) ({{.ReturnTypes}}) {
 	w := b.world
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	a := b.arch
-	for len(w.entities.freeIDs) < count {
-		w.expand()
-	}
-	startSize := a.size
-	a.size += count
-	popped := w.entities.freeIDs[len(w.entities.freeIDs)-count:]
-	w.entities.freeIDs = w.entities.freeIDs[:len(w.entities.freeIDs)-count]
-	for k := 0; k < count; k++ {
-		id := popped[k]
-		meta := &w.entities.metas[id]
-		meta.archetypeIndex = a.index
-		meta.index = startSize + k
-		meta.version = w.entities.nextEntityVer
-		ent := Entity{ID: id, Version: meta.version}
-		a.entityIDs[startSize+k] = ent
-		{{range .Components}}*(*{{.TypeName}})(unsafe.Pointer(uintptr(a.compPointers[b.id{{.Index}}]) + uintptr(startSize+k)*a.compSizes[b.id{{.Index}}])) = {{.BuilderVarName}}
-		{{end}}
-		w.entities.nextEntityVer++
-	}
-	w.mutationVersion.Add(1)
-}
-
-// Get retrieves pointers to the components for the given entity.
-//
-// If the entity is invalid or does not have all the components, this returns nils.
-//
-// Parameters:
-//   - e: The entity to get the components from.
-//
-// Returns:
-//   - Pointers to the component data, or nils if not found.
-func (b *Builder{{.N}}[{{.TypeVars}}]) Get(e Entity) ({{.ReturnTypes}}) {
-	w := b.world
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	if !w.IsValidNoLock(e) {
+	if uint(e.ID) >= uint(len(w.metas)) {
 		return {{.ReturnNil}}
 	}
-	meta := w.entities.metas[e.ID]
-	a := w.archetypes.archetypes[meta.archetypeIndex]
-	{{range .Components}}i{{.Index}} := b.id{{.Index}} >> 6
-	o{{.Index}} := b.id{{.Index}} & 63
-	{{end}}
-	if {{.BuilderMaskCheck}} {
+	meta := w.metas[e.ID]
+	a := meta.arch
+	if a == nil || meta.version != e.Version {
 		return {{.ReturnNil}}
 	}
+	{{- range .Components}}
+	c{{.Index}} := a.compIdx[b.id{{.Index}}]
+	{{- end}}
+	if {{.CompIdxCheck}} {
+		return {{.ReturnNil}}
+	}
+	{{- range .Components}}
+	var z{{.Index}} {{.TypeName}}
+	{{- end}}
 	return {{range $i, $e := .Components}}{{if $i}},
-		{{end}}(*{{$e.TypeName}})(unsafe.Add(a.compPointers[b.id{{$e.Index}}], uintptr(meta.index)*a.compSizes[b.id{{$e.Index}}])){{end}}
+		{{end}}(*{{$e.TypeName}})(unsafe.Add(a.columns[c{{$e.Index}}].data, uintptr(meta.index)*unsafe.Sizeof(z{{$e.Index}}))){{end}}
 }
 
-// Set adds or updates the components for a given entity with the specified
-// values.
-//
-// If the entity already has all the components, their values are updated. If not,
-// the missing components are added, which may trigger an archetype change.
-//
-// It is safe to call this on an invalid entity; the operation will be ignored.
-//
-// Parameters:
-//   - e: The entity to modify.
-{{range .Components}}//   - v{{.Index}}: The value for {{.TypeName}}.
-{{end}}func (b *Builder{{.N}}[{{.TypeVars}}]) Set(e Entity, {{.SetVars}}) {
+// Has reports whether entity e is valid and has all of the builder's
+// components.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) Has(e Entity) bool {
 	w := b.world
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.IsValidNoLock(e) {
-		return
+	if uint(e.ID) >= uint(len(w.metas)) {
+		return false
 	}
-	meta := &w.entities.metas[e.ID]
-	a := w.archetypes.archetypes[meta.archetypeIndex]
-	{{range .Components}}has{{.Index}} := (a.mask[b.id{{.Index}}>>6] & (uint64(1) << uint64(b.id{{.Index}}&63))) != 0
-	{{end}}
-	if {{.SetHasVars}} {
-		{{range .Components}}*(*{{.TypeName}})(unsafe.Pointer(uintptr(a.compPointers[b.id{{.Index}}]) + uintptr(meta.index)*a.compSizes[b.id{{.Index}}])) = v{{.Index}}
-		{{end}}
-		return
+	meta := w.metas[e.ID]
+	a := meta.arch
+	if a == nil || meta.version != e.Version {
+		return false
 	}
-	newMask := a.mask
-	{{range .Components}}if !has{{.Index}} {
-		newMask.set(b.id{{.Index}})
-	}
-	{{end}}
-	var targetA *archetype
-	if idx, ok := w.archetypes.maskToArcIndex[newMask]; ok {
-		targetA = w.archetypes.archetypes[idx]
-	} else {
-		var tempSpecs [MaxComponentTypes]compSpec
-		count := 0
-		w.components.mu.RLock()
-		for _, cid := range a.compOrder {
-			tempSpecs[count] = compSpec{id: cid, typ: w.components.compIDToType[cid], size: w.components.compIDToSize[cid]}
-			count++
-		}
-		{{range .Components}}if !has{{.Index}} {
-			tempSpecs[count] = compSpec{id: b.id{{.Index}}, typ: w.components.compIDToType[b.id{{.Index}}], size: w.components.compIDToSize[b.id{{.Index}}]}
-			count++
-		}
-		{{end}}
-		w.components.mu.RUnlock()
-		specs := tempSpecs[:count]
-		targetA = w.getOrCreateArchetypeNoLock(newMask, specs)
-	}
-	newIdx := targetA.size
-	targetA.entityIDs[newIdx] = e
-	targetA.size++
-	for _, cid := range a.compOrder {
-		src := unsafe.Pointer(uintptr(a.compPointers[cid]) + uintptr(meta.index)*a.compSizes[cid])
-		dst := unsafe.Pointer(uintptr(targetA.compPointers[cid]) + uintptr(newIdx)*targetA.compSizes[cid])
-		memCopy(dst, src, a.compSizes[cid])
-	}
-	{{range .Components}}*(*{{.TypeName}})(unsafe.Pointer(uintptr(targetA.compPointers[b.id{{.Index}}]) + uintptr(newIdx)*targetA.compSizes[b.id{{.Index}}])) = v{{.Index}}
-	{{end}}
-	w.removeFromArchetype(a, meta)
-	meta.archetypeIndex = targetA.index
-	meta.index = newIdx
-	w.mutationVersion.Add(1)
+	return {{range $i, $e := .Components}}{{if $i}} && {{end}}a.compIdx[b.id{{$e.Index}}] >= 0{{end}}
 }
 
-// SetBatch efficiently sets the component values for a slice of entities.
-// It iterates over the entities and calls `Set` for each one.
-//
-// Parameters:
-//   - entities: A slice of entities to modify.
-{{range .Components}}//   - v{{.Index}}: The component value to set for type {{.TypeName}}.
-{{end}}func (b *Builder{{.N}}[{{.TypeVars}}]) SetBatch(entities []Entity, {{.SetVars}}) {
+// Set adds or updates the builder's components on entity e.
+// Does nothing if e is invalid.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) Set(e Entity, {{.Vars}}) {
+	w := b.world
+	if uint(e.ID) >= uint(len(w.metas)) {
+		return
+	}
+	meta := &w.metas[e.ID]
+	a := meta.arch
+	if a == nil || meta.version != e.Version {
+		return
+	}
+	{{- range .Components}}
+	c{{.Index}} := a.compIdx[b.id{{.Index}}]
+	{{- end}}
+	if {{range $i, $e := .Components}}{{if $i}} && {{end}}c{{$e.Index}} >= 0{{end}} {
+		{{- range .Components}}
+		var z{{.Index}} {{.TypeName}}
+		if unsafe.Sizeof(z{{.Index}}) > 0 {
+			*(*{{.TypeName}})(unsafe.Add(a.columns[c{{.Index}}].data, uintptr(meta.index)*unsafe.Sizeof(z{{.Index}}))) = v{{.Index}}
+		}
+		{{- end}}
+		return
+	}
+	var edge *transitionEdge
+	if a != b.lastAddSrc {
+		{{- if eq .N 1}}
+		edge = w.getAddEdge(a, b.id1)
+		{{- else}}
+		newMask := a.mask
+		newMask[0] |= b.mask[0]
+		newMask[1] |= b.mask[1]
+		newMask[2] |= b.mask[2]
+		newMask[3] |= b.mask[3]
+		edge = w.getTransitionEdge(a, newMask)
+		{{- end}}
+		b.lastAddSrc = a
+		b.lastAddEdge = edge
+		dst := edge.target
+		{{- range $i, $e := .Components}}
+		b.lastAddCols[{{$i}}] = uint8(dst.compIdx[b.id{{$e.Index}}])
+		{{- end}}
+	} else {
+		edge = b.lastAddEdge
+	}
+	newIdx := w.moveEntity(e, meta, a, edge)
+	dst := edge.target
+	{{- range $i, $e := .Components}}
+	var z{{.Index}} {{$e.TypeName}}
+	if unsafe.Sizeof(z{{.Index}}) > 0 {
+		*(*{{$e.TypeName}})(unsafe.Add(dst.columns[b.lastAddCols[{{$i}}]].data, uintptr(newIdx)*unsafe.Sizeof(z{{.Index}}))) = v{{$e.Index}}
+	}
+	{{- end}}
+}
+
+// SetBatch adds or updates the builder's components on every entity in
+// entities.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) SetBatch(entities []Entity, {{.Vars}}) {
+	if len(entities) == 0 {
+		return
+	}
+	w := b.world
 	for _, e := range entities {
-		b.Set(e, {{.SetVarNames}})
+		if uint(e.ID) >= uint(len(w.metas)) {
+			continue
+		}
+		meta := &w.metas[e.ID]
+		a := meta.arch
+		if a == nil || meta.version != e.Version {
+			continue
+		}
+		{{- range .Components}}
+		c{{.Index}} := a.compIdx[b.id{{.Index}}]
+		{{- end}}
+		if {{range $i, $e := .Components}}{{if $i}} && {{end}}c{{$e.Index}} >= 0{{end}} {
+			{{- range .Components}}
+			var z{{.Index}} {{.TypeName}}
+			if unsafe.Sizeof(z{{.Index}}) > 0 {
+				*(*{{.TypeName}})(unsafe.Add(a.columns[c{{.Index}}].data, uintptr(meta.index)*unsafe.Sizeof(z{{.Index}}))) = v{{.Index}}
+			}
+			{{- end}}
+			continue
+		}
+		var edge *transitionEdge
+		if a != b.lastAddSrc {
+			{{- if eq .N 1}}
+			edge = w.getAddEdge(a, b.id1)
+			{{- else}}
+			newMask := a.mask
+			newMask[0] |= b.mask[0]
+			newMask[1] |= b.mask[1]
+			newMask[2] |= b.mask[2]
+			newMask[3] |= b.mask[3]
+			edge = w.getTransitionEdge(a, newMask)
+			{{- end}}
+			b.lastAddSrc = a
+			b.lastAddEdge = edge
+			dst := edge.target
+			{{- range $i, $e := .Components}}
+			b.lastAddCols[{{$i}}] = uint8(dst.compIdx[b.id{{$e.Index}}])
+			{{- end}}
+		} else {
+			edge = b.lastAddEdge
+		}
+		newIdx := w.moveEntity(e, meta, a, edge)
+		dst := edge.target
+		{{- range $i, $e := .Components}}
+		var z{{.Index}} {{$e.TypeName}}
+		if unsafe.Sizeof(z{{.Index}}) > 0 {
+			*(*{{$e.TypeName}})(unsafe.Add(dst.columns[b.lastAddCols[{{$i}}]].data, uintptr(newIdx)*unsafe.Sizeof(z{{.Index}}))) = v{{$e.Index}}
+		}
+		{{- end}}
+	}
+}
+
+// Remove removes the builder's components from entity e.
+// Does nothing if e is invalid or has none of the builder's components.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) Remove(e Entity) {
+	w := b.world
+	if uint(e.ID) >= uint(len(w.metas)) {
+		return
+	}
+	meta := &w.metas[e.ID]
+	a := meta.arch
+	if a == nil || meta.version != e.Version {
+		return
+	}
+	{{- if eq .N 1}}
+	if a.compIdx[b.id1] < 0 {
+		return
+	}
+	{{- else}}
+	if !a.mask.intersects(b.mask) {
+		return
+	}
+	{{- end}}
+	var edge *transitionEdge
+	if a != b.lastRemSrc {
+		{{- if eq .N 1}}
+		edge = w.getRemoveEdge(a, b.id1)
+		{{- else}}
+		newMask := a.mask
+		newMask[0] &^= b.mask[0]
+		newMask[1] &^= b.mask[1]
+		newMask[2] &^= b.mask[2]
+		newMask[3] &^= b.mask[3]
+		edge = w.getTransitionEdge(a, newMask)
+		{{- end}}
+		b.lastRemSrc = a
+		b.lastRemEdge = edge
+	} else {
+		edge = b.lastRemEdge
+	}
+	w.moveEntity(e, meta, a, edge)
+}
+
+// RemoveBatch removes the builder's components from every entity in entities.
+func (b *Builder{{.Suffix}}[{{.TypeVars}}]) RemoveBatch(entities []Entity) {
+	for _, e := range entities {
+		b.Remove(e)
 	}
 }

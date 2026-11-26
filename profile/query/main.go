@@ -5,8 +5,11 @@
 package main
 
 import (
+	"log"
+	"os"
+	"runtime/pprof"
+
 	"github.com/edwinsyarief/teishoku"
-	"github.com/pkg/profile"
 )
 
 type comp1 struct {
@@ -23,25 +26,34 @@ func main() {
 	count := 50
 	iters := 10000
 	entities := 1000
-	p := profile.Start(profile.MemProfileAllocs, profile.ProfilePath("."), profile.NoShutdownHook)
+
+	f, err := os.Create("mem.pprof")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
 	run(count, iters, entities)
-	p.Stop()
+
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func run(rounds, iters, numEntities int) {
 	for range rounds {
 		w := teishoku.NewWorld(numEntities)
-		query := teishoku.NewFilter2[comp1, comp2](w)
+		filter := teishoku.NewFilter2[comp1, comp2](w)
 		batch := teishoku.NewBuilder2[comp1, comp2](w)
 		batch.NewEntities(numEntities)
 
 		for range iters {
-			query.Reset()
-			for query.Next() {
-				comp1, comp2 := query.Get()
-				comp1.V += comp2.V
-				comp1.W += comp2.W
-			}
+			filter.EachChunk(func(c1 []comp1, c2 []comp2) {
+				for i := range c1 {
+					c1[i].V += c2[i].V
+					c1[i].W += c2[i].W
+				}
+			})
 		}
 	}
 }

@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+var (
+	benchSink     float64
+	benchEntsSink []Entity
+)
+
 // World Creation Benchmarks
 func BenchmarkCreateWorld(b *testing.B) {
 	sizes := []int{1000, 10000, 100000, 1000000}
@@ -14,10 +19,10 @@ func BenchmarkCreateWorld(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				_ = NewWorld(size)
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -30,17 +35,16 @@ func BenchmarkAutoExpand(b *testing.B) {
 		name := fmt.Sprintf("%dK_init_x%d", initSize/1000, expandMultiplier)
 		b.Run(name, func(b *testing.B) {
 			targetEntities := initSize * expandMultiplier
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(initSize)
 				builder := NewBuilder[Position](w)
 				b.StartTimer()
-				for j := range targetEntities {
-					_ = j
+				for range targetEntities {
 					builder.NewEntity()
 				}
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -54,16 +58,15 @@ func BenchmarkWorldCreateEntity(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
 				b.StartTimer()
-				for j := range size {
-					_ = j
+				for range size {
 					w.CreateEntity()
 				}
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -76,13 +79,13 @@ func BenchmarkWorldCreateEntities(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
 				b.StartTimer()
 				w.CreateEntities(size)
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -96,17 +99,39 @@ func BenchmarkBuilderNewEntity(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
 				builder := NewBuilder[Position](w)
 				b.StartTimer()
-				for j := range size {
-					_ = j
+				for range size {
 					builder.NewEntity()
 				}
 			}
+		})
+	}
+}
+
+func BenchmarkBuilderNewEntityWith(b *testing.B) {
+	sizes := []int{1000, 10000, 100000, 1000000}
+	for _, size := range sizes {
+		name := fmt.Sprintf("%dK", size/1000)
+		if size == 1000000 {
+			name = "1M"
+		}
+		b.Run(name, func(b *testing.B) {
+			val := Position{1, 2}
 			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				w := NewWorld(size)
+				builder := NewBuilder[Position](w)
+				b.StartTimer()
+				for range size {
+					builder.NewEntityWith(val)
+				}
+			}
 		})
 	}
 }
@@ -119,6 +144,7 @@ func BenchmarkBuilderNewEntities(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -126,12 +152,11 @@ func BenchmarkBuilderNewEntities(b *testing.B) {
 				b.StartTimer()
 				builder.NewEntities(size)
 			}
-			b.ReportAllocs()
 		})
 	}
 }
 
-func BenchmarkBuilderNewEntitiesWithValueSet(b *testing.B) {
+func BenchmarkBuilderNewEntitiesWith(b *testing.B) {
 	sizes := []int{1000, 10000, 100000, 1000000}
 	for _, size := range sizes {
 		name := fmt.Sprintf("%dK", size/1000)
@@ -140,19 +165,19 @@ func BenchmarkBuilderNewEntitiesWithValueSet(b *testing.B) {
 		}
 		b.Run(name, func(b *testing.B) {
 			val := Position{1, 2}
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
 				builder := NewBuilder[Position](w)
 				b.StartTimer()
-				builder.NewEntitiesWithValueSet(size, val)
+				builder.NewEntitiesWith(size, val)
 			}
-			b.ReportAllocs()
 		})
 	}
 }
 
-func BenchmarkBuilderNewEntitiesWithValueSet2(b *testing.B) {
+func BenchmarkBuilderNewEntitiesWith2(b *testing.B) {
 	sizes := []int{1000, 10000, 100000, 1000000}
 	for _, size := range sizes {
 		name := fmt.Sprintf("%dK", size/1000)
@@ -162,14 +187,14 @@ func BenchmarkBuilderNewEntitiesWithValueSet2(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			pos := Position{1, 2}
 			vel := Velocity{3, 4}
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
 				builder2 := NewBuilder2[Position, Velocity](w)
 				b.StartTimer()
-				builder2.NewEntitiesWithValueSet(size, pos, vel)
+				builder2.NewEntitiesWith(size, pos, vel)
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -182,6 +207,7 @@ func BenchmarkBuilderSetComponent(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -195,7 +221,6 @@ func BenchmarkBuilderSetComponent(b *testing.B) {
 					builder.Set(ents[j], Position{})
 				}
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -208,6 +233,7 @@ func BenchmarkBuilderSetComponent2(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -221,7 +247,33 @@ func BenchmarkBuilderSetComponent2(b *testing.B) {
 					builder.Set(ents[j], Position{}, Velocity{})
 				}
 			}
+		})
+	}
+}
+
+func BenchmarkBuilderRemove(b *testing.B) {
+	sizes := []int{1000, 10000, 100000, 1000000}
+	for _, size := range sizes {
+		name := fmt.Sprintf("%dK", size/1000)
+		if size == 1000000 {
+			name = "1M"
+		}
+		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				w := NewWorld(size)
+				builder2 := NewBuilder2[Position, Velocity](w)
+				_ = NewBuilder[Position](w)
+				builderVel := NewBuilder[Velocity](w)
+				builder2.NewEntities(size)
+				ents := make([]Entity, size)
+				copy(ents, builder2.arch.entityIDs[:size])
+				b.StartTimer()
+				for j := range size {
+					builderVel.Remove(ents[j])
+				}
+			}
 		})
 	}
 }
@@ -237,14 +289,17 @@ func BenchmarkBuilderGetComponent(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder := NewBuilder[Position](w)
-			builder.NewEntities(size)
+			builder.NewEntitiesWith(size, Position{X: 1, Y: 2})
 			ents := builder.arch.entityIDs[:size]
-			for b.Loop() {
-				for j := range size {
-					builder.Get(ents[j%size])
-				}
-			}
 			b.ReportAllocs()
+			for b.Loop() {
+				var sum float64
+				for j := range size {
+					p := builder.Get(ents[j])
+					sum += float64(p.X + p.Y)
+				}
+				benchSink = sum
+			}
 		})
 	}
 }
@@ -259,14 +314,17 @@ func BenchmarkBuilderGetComponent2(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder := NewBuilder2[Position, Velocity](w)
-			builder.NewEntities(size)
+			builder.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 3, DY: 4})
 			ents := builder.arch.entityIDs[:size]
-			for b.Loop() {
-				for j := range size {
-					builder.Get(ents[j%size])
-				}
-			}
 			b.ReportAllocs()
+			for b.Loop() {
+				var sum float64
+				for j := range size {
+					p, v := builder.Get(ents[j])
+					sum += float64(p.X + v.DX)
+				}
+				benchSink = sum
+			}
 		})
 	}
 }
@@ -281,36 +339,17 @@ func BenchmarkFunctionsGetComponent(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder := NewBuilder[Position](w)
-			builder.NewEntities(size)
+			builder.NewEntitiesWith(size, Position{X: 1, Y: 2})
 			ents := builder.arch.entityIDs[:size]
-			for b.Loop() {
-				for j := range size {
-					GetComponent[Position](w, ents[j%size])
-				}
-			}
 			b.ReportAllocs()
-		})
-	}
-}
-
-func BenchmarkFunctionsGetComponent2(b *testing.B) {
-	sizes := []int{1000, 10000, 100000, 1000000}
-	for _, size := range sizes {
-		name := fmt.Sprintf("%dK", size/1000)
-		if size == 1000000 {
-			name = "1M"
-		}
-		b.Run(name, func(b *testing.B) {
-			w := NewWorld(size)
-			builder := NewBuilder2[Position, Velocity](w)
-			builder.NewEntities(size)
-			ents := builder.arch.entityIDs[:size]
 			for b.Loop() {
+				var sum float64
 				for j := range size {
-					GetComponent2[Position, Velocity](w, ents[j%size])
+					p := GetComponent[Position](w, ents[j])
+					sum += float64(p.X + p.Y)
 				}
+				benchSink = sum
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -328,12 +367,12 @@ func BenchmarkFunctionsSetComponentExisting(b *testing.B) {
 			builder.NewEntities(size)
 			ents := builder.arch.entityIDs[:size]
 			val := Position{1, 2}
+			b.ReportAllocs()
 			for b.Loop() {
 				for j := range size {
-					SetComponent(w, ents[j%size], val)
+					SetComponent(w, ents[j], val)
 				}
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -347,6 +386,7 @@ func BenchmarkFunctionsSetComponentNew(b *testing.B) {
 		}
 		b.Run(name, func(b *testing.B) {
 			val := Velocity{3, 4}
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -355,18 +395,18 @@ func BenchmarkFunctionsSetComponentNew(b *testing.B) {
 				dummy := dummyBuilder.NewEntity()
 				w.RemoveEntity(dummy)
 				builder.NewEntities(size)
-				ents := builder.arch.entityIDs[:size]
+				ents := make([]Entity, size)
+				copy(ents, builder.arch.entityIDs[:size])
 				b.StartTimer()
 				for j := range size {
 					SetComponent(w, ents[j], val)
 				}
 			}
-			b.ReportAllocs()
 		})
 	}
 }
 
-// Removal Benchmarks
+// Removal & Swap Benchmarks
 func BenchmarkFunctionsRemoveComponent(b *testing.B) {
 	sizes := []int{1000, 10000, 100000, 1000000}
 	for _, size := range sizes {
@@ -375,6 +415,7 @@ func BenchmarkFunctionsRemoveComponent(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -383,13 +424,40 @@ func BenchmarkFunctionsRemoveComponent(b *testing.B) {
 				dummy := dummyBuilder.NewEntity()
 				w.RemoveEntity(dummy)
 				builder2.NewEntities(size)
-				ents := builder2.arch.entityIDs[:size]
+				ents := make([]Entity, size)
+				copy(ents, builder2.arch.entityIDs[:size])
 				b.StartTimer()
 				for j := range size {
 					RemoveComponent[Velocity](w, ents[j])
 				}
 			}
+		})
+	}
+}
+
+func BenchmarkSwapperSwap(b *testing.B) {
+	sizes := []int{1000, 10000, 100000, 1000000}
+	for _, size := range sizes {
+		name := fmt.Sprintf("%dK", size/1000)
+		if size == 1000000 {
+			name = "1M"
+		}
+		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				w := NewWorld(size)
+				builder2 := NewBuilder2[Position, Velocity](w)
+				_ = NewBuilder2[Position, Health](w)
+				swapper := NewSwapper[Velocity, Health](w)
+				builder2.NewEntities(size)
+				ents := make([]Entity, size)
+				copy(ents, builder2.arch.entityIDs[:size])
+				b.StartTimer()
+				for j := range size {
+					swapper.Swap(ents[j], Health{HP: 100})
+				}
+			}
 		})
 	}
 }
@@ -402,6 +470,7 @@ func BenchmarkWorldRemoveEntity(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -414,7 +483,6 @@ func BenchmarkWorldRemoveEntity(b *testing.B) {
 					w.RemoveEntity(ents[j])
 				}
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -427,6 +495,7 @@ func BenchmarkWorldRemoveEntities(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -435,11 +504,8 @@ func BenchmarkWorldRemoveEntities(b *testing.B) {
 				ents := make([]Entity, size)
 				copy(ents, builder.arch.entityIDs[:size])
 				b.StartTimer()
-				for j := range size {
-					w.RemoveEntity(ents[j])
-				}
+				w.RemoveEntities(ents)
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -452,6 +518,7 @@ func BenchmarkWorldClearEntities(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -460,7 +527,6 @@ func BenchmarkWorldClearEntities(b *testing.B) {
 				b.StartTimer()
 				w.ClearEntities()
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -473,6 +539,7 @@ func BenchmarkFilterRemoveEntities(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -482,7 +549,6 @@ func BenchmarkFilterRemoveEntities(b *testing.B) {
 				b.StartTimer()
 				filter.RemoveEntities()
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -495,6 +561,7 @@ func BenchmarkFilter2RemoveEntities(b *testing.B) {
 			name = "1M"
 		}
 		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w := NewWorld(size)
@@ -504,7 +571,6 @@ func BenchmarkFilter2RemoveEntities(b *testing.B) {
 				b.StartTimer()
 				filter2.RemoveEntities()
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -520,15 +586,19 @@ func BenchmarkFilterIterate(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder := NewBuilder[Position](w)
-			builder.NewEntities(size)
+			builder.NewEntitiesWith(size, Position{X: 1, Y: 2})
 			filter := NewFilter[Position](w)
+			b.ReportAllocs()
 			for b.Loop() {
+				var sum float64
 				query := filter.Query()
 				for query.Next() {
-					_ = query.Get()
+					p := query.Get()
+					p.X += 1
+					sum += float64(p.X + p.Y)
 				}
+				benchSink = sum
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -543,15 +613,82 @@ func BenchmarkFilter2Iterate(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder2 := NewBuilder2[Position, Velocity](w)
-			builder2.NewEntities(size)
+			builder2.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 0.5, DY: 0.5})
 			filter2 := NewFilter2[Position, Velocity](w)
+			b.ReportAllocs()
 			for b.Loop() {
+				var sum float64
 				query := filter2.Query()
 				for query.Next() {
-					_, _ = query.Get()
+					p, v := query.Get()
+					p.X += v.DX
+					p.Y += v.DY
+					sum += float64(p.X + p.Y)
 				}
+				benchSink = sum
 			}
+		})
+	}
+}
+
+func BenchmarkFilter2EachChunk(b *testing.B) {
+	sizes := []int{1000, 10000, 100000, 1000000}
+	for _, size := range sizes {
+		name := fmt.Sprintf("%dK", size/1000)
+		if size == 1000000 {
+			name = "1M"
+		}
+		b.Run(name, func(b *testing.B) {
+			w := NewWorld(size)
+			builder2 := NewBuilder2[Position, Velocity](w)
+			builder2.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 0.5, DY: 0.5})
+			filter2 := NewFilter2[Position, Velocity](w)
 			b.ReportAllocs()
+			for b.Loop() {
+				var sum float64
+				filter2.EachChunk(func(pos []Position, vel []Velocity) {
+					for i := range pos {
+						pos[i].X += vel[i].DX
+						pos[i].Y += vel[i].DY
+					}
+					if len(pos) > 0 {
+						sum += float64(pos[0].X)
+					}
+				})
+				benchSink = sum
+			}
+		})
+	}
+}
+
+func BenchmarkFilter2Chunks(b *testing.B) {
+	sizes := []int{1000, 10000, 100000, 1000000}
+	for _, size := range sizes {
+		name := fmt.Sprintf("%dK", size/1000)
+		if size == 1000000 {
+			name = "1M"
+		}
+		b.Run(name, func(b *testing.B) {
+			w := NewWorld(size)
+			builder2 := NewBuilder2[Position, Velocity](w)
+			builder2.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 0.5, DY: 0.5})
+			filter2 := NewFilter2[Position, Velocity](w)
+			b.ReportAllocs()
+			for b.Loop() {
+				var sum float64
+				chunks := filter2.Chunks()
+				for chunks.Next() {
+					pos, vel := chunks.Get()
+					for i := range pos {
+						pos[i].X += vel[i].DX
+						pos[i].Y += vel[i].DY
+					}
+					if len(pos) > 0 {
+						sum += float64(pos[0].X)
+					}
+				}
+				benchSink = sum
+			}
 		})
 	}
 }
@@ -566,15 +703,19 @@ func BenchmarkFilter3Iterate(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder3 := NewBuilder3[Position, Velocity, Health](w)
-			builder3.NewEntities(size)
+			builder3.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 0.5, DY: 0.5}, Health{HP: 100})
 			filter3 := NewFilter3[Position, Velocity, Health](w)
+			b.ReportAllocs()
 			for b.Loop() {
+				var sum float64
 				query := filter3.Query()
 				for query.Next() {
-					_, _, _ = query.Get()
+					p, v, h := query.Get()
+					p.X += v.DX
+					sum += float64(p.X) + float64(h.HP)
 				}
+				benchSink = sum
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -589,15 +730,22 @@ func BenchmarkFilter4Iterate(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder4 := NewBuilder4[Position, Velocity, Health, WithPointer](w)
-			builder4.NewEntities(size)
+			builder4.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 0.5, DY: 0.5}, Health{HP: 100}, WithPointer{})
 			filter4 := NewFilter4[Position, Velocity, Health, WithPointer](w)
+			b.ReportAllocs()
 			for b.Loop() {
+				var sum float64
 				query := filter4.Query()
 				for query.Next() {
-					_, _, _, _ = query.Get()
+					p, v, h, wp := query.Get()
+					p.X += v.DX
+					sum += float64(p.X) + float64(h.HP)
+					if wp.Data != nil {
+						sum += float64(*wp.Data)
+					}
 				}
+				benchSink = sum
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -612,15 +760,22 @@ func BenchmarkFilter5Iterate(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder5 := NewBuilder5[Position, Velocity, Health, WithPointer, Dummy1](w)
-			builder5.NewEntities(size)
+			builder5.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 0.5, DY: 0.5}, Health{HP: 100}, WithPointer{}, Dummy1{Val: 1})
 			filter5 := NewFilter5[Position, Velocity, Health, WithPointer, Dummy1](w)
+			b.ReportAllocs()
 			for b.Loop() {
+				var sum float64
 				query := filter5.Query()
 				for query.Next() {
-					_, _, _, _, _ = query.Get()
+					p, v, h, wp, d1 := query.Get()
+					p.X += v.DX
+					sum += float64(p.X) + float64(h.HP) + float64(d1.Val)
+					if wp.Data != nil {
+						sum += float64(*wp.Data)
+					}
 				}
+				benchSink = sum
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -635,15 +790,22 @@ func BenchmarkFilter6Iterate(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			w := NewWorld(size)
 			builder6 := NewBuilder6[Position, Velocity, Health, WithPointer, Dummy1, Dummy2](w)
-			builder6.NewEntities(size)
+			builder6.NewEntitiesWith(size, Position{X: 1, Y: 2}, Velocity{DX: 0.5, DY: 0.5}, Health{HP: 100}, WithPointer{}, Dummy1{Val: 1}, Dummy2{Val: 2})
 			filter6 := NewFilter6[Position, Velocity, Health, WithPointer, Dummy1, Dummy2](w)
+			b.ReportAllocs()
 			for b.Loop() {
+				var sum float64
 				query := filter6.Query()
 				for query.Next() {
-					_, _, _, _, _, _ = query.Get()
+					p, v, h, wp, d1, d2 := query.Get()
+					p.X += v.DX
+					sum += float64(p.X) + float64(h.HP) + float64(d1.Val) + float64(d2.Val)
+					if wp.Data != nil {
+						sum += float64(*wp.Data)
+					}
 				}
+				benchSink = sum
 			}
-			b.ReportAllocs()
 		})
 	}
 }
@@ -660,10 +822,10 @@ func BenchmarkFilterGetEntitiesCached(b *testing.B) {
 			builder := NewBuilder[Position](w)
 			builder.NewEntities(size)
 			filter := NewFilter[Position](w)
-			for b.Loop() {
-				filter.Entities()
-			}
 			b.ReportAllocs()
+			for b.Loop() {
+				benchEntsSink = filter.Entities()
+			}
 		})
 	}
 }
@@ -679,14 +841,14 @@ func BenchmarkFilterGetEntitiesUncached(b *testing.B) {
 			w := NewWorld(size)
 			builder := NewBuilder[Position](w)
 			filter := NewFilter[Position](w)
+			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
 				w.ClearEntities()
 				builder.NewEntities(size)
 				b.StartTimer()
-				filter.Entities()
+				benchEntsSink = filter.Entities()
 			}
-			b.ReportAllocs()
 		})
 	}
 }

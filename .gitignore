@@ -1,3 +1,4 @@
 *.work*
 *.exe*
 *.pprof*
+.agents/

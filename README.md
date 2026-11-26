@@ -1,64 +1,32 @@
 # Teishoku ECS
 
-![Go Version](https://img.shields.io/badge/Go-1.25.1-blue?logo=go&style=flat&logoColor=white)
+![Go Version](https://img.shields.io/badge/Go-1.26+-blue?logo=go&style=flat&logoColor=white)
 ![Go Reference](https://pkg.go.dev/badge/github.com/edwinsyarief/teishoku.svg)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/edwinsyarief/teishoku/test.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/edwinsyarief/teishoku)](https://goreportcard.com/report/github.com/edwinsyarief/teishoku)
 
-`Teishoku` is a high-performance, archetype-based, and easy-to-use Entity Component System (ECS) library for Go.
+`Teishoku` is a **zero-dependency**, high-performance, archetype-based Entity Component System (ECS) library for Go.
 
-It is designed for performance-critical applications like games and simulations, offering a simple, generic API that emphasizes **zero-allocation performance** on the hot path. By storing entities with the same component layout in contiguous memory blocks (archetypes), `Teishoku` enables extremely fast, cache-friendly iteration.
+Designed for games, real-time simulations, and data-oriented workloads, `Teishoku` pairs a clean, cohesive generic API (`World`, `Builder`, `Filter`, `Swapper`, `Resources`, `EventBus`) with Go-native systems optimizations:
 
-## Features
+- **Zero External Dependencies**: Pure Go standard library only.
+- **Monomorphized Typed Column Kernels**: Component storage uses compile-time generic column ops (`alloc`/`grow`/`copy`/`zero`) — zero `reflect.MakeSlice` on archetype growth, zeroing skipped for POD structs, and full GC write-barrier safety for pointer-bearing components.
+- **16-Byte Direct-Pointer Entity Slots**: Each entity slot stores a direct `*archetype` pointer, row index, and per-slot generation counter (4 slots per 64-byte cache line; no table-array indirection).
+- **Precomputed Transition Copy-Plans + Inline Monomorphic Cache**: Structural changes (`Set`, `Remove`, `Swap`) cache `(lastSrc -> transitionEdge)` directly on `Builder`/`Swapper` with pre-matched surviving column pairs.
+- **Compile-Time Constant Strides & `EachChunk` Slice Iteration**: `Query` uses compile-time `unsafe.Sizeof` strides with pre-resolved column indices, while `EachChunk` / `Chunks` expose contiguous typed component slices directly at native Go slice speed (~0.73 ns/entity).
+- **Batteries Included**: Built-in typed `Resources` (with `ResourceHandle[T]`) and typed `EventBus` (with zero-lookup `EventChannel[T]`).
 
-- **Archetype-Based**: Maximizes cache efficiency by grouping entities with identical component sets.
-- **Generic API**: Leverages Go generics for a clean, type-safe, and intuitive developer experience.
-- **Zero-Allocation Hot Path**: Entity creation, querying, and component access are optimized for speed with minimal GC overhead.
-- **Simple and Clean**: Designed to be easy to learn and integrate into any project.
-
-## When to use Teishoku
-
-`Teishoku` is ideal for projects where performance is critical and you need to manage a large number of objects with varying properties. Common use cases include:
-
--   Game development (e.g., managing game objects, characters, and particles).
--   High-performance simulations.
--   Real-time systems that require predictable performance and low latency.
-
-## How It Works
-
-`Teishoku` is built around a few core concepts that work together to provide a high-performance and ergonomic experience.
-
-### World, Entity, and Component
-
--   **World**: The central container that manages all entities, components, and game state. All ECS operations happen within a `World`. It also includes a `Resources` map for storing global, singleton-like data.
--   **Entity**: A simple integer that uniquely identifies an object in your application. It doesn't hold any data itself but serves as a key to associate a group of components.
--   **Component**: A plain Go struct that stores data (e.g., `Position`, `Velocity`). Components should contain only data and no logic.
-
-### Archetypes and Performance
-
-The key to `teishoku`'s performance is its **archetype-based architecture**.
-
-An **archetype** is a unique combination of component types. For example, all entities that have _only_ a `Position` and a `Velocity` component belong to the same archetype.
-
-Inside an archetype, all components are stored in tightly packed, contiguous arrays. This means all `Position` components are next to each other in memory, and all `Velocity` components are also next to each other. When a `Filter` iterates over entities, it can access their component data in a linear, cache-friendly manner, which is extremely fast.
-
-When you add or remove a component from an entity, the entity is moved from its old archetype to a new one that matches its new set of components. While this operation is efficient, it is slower than creating entities with a fixed layout using a `Builder`.
+---
 
 ## Getting Started
 
-This guide covers the primary workflow for setting up and using `Teishoku`.
-
-### 1. Installation
-
-Add `Teishoku` as a dependency to your project:
+### Installation
 
 ```bash
 go get github.com/edwinsyarief/teishoku
 ```
 
-### 2. A Complete Example
-
-Here is a complete, runnable example that demonstrates the core features:
+### Complete Example
 
 ```go
 package main
@@ -68,428 +36,210 @@ import (
 	"github.com/edwinsyarief/teishoku"
 )
 
-// 1. Define Components
-// Components are simple Go structs that hold data.
-
 type Position struct {
-	X, Y float32
+	X, Y float64
 }
 
 type Velocity struct {
-	VX, VY float32
+	VX, VY float64
 }
 
+type Static struct{}
+
 func main() {
-	// 2. Create a World
-	// The World is the container for all your entities and components.
+	// 1. Create a World (optional initial capacity hint).
 	world := teishoku.NewWorld(10000)
 
-	// 3. Create Entities with a Builder
-	// A Builder is the most efficient way to create entities with a
-	// predefined set of components.
-	builder := teishoku.NewBuilder2[Position, Velocity](&world)
+	// 2. Spawn entities with a Builder (supports 1 to 8 components).
+	builder := teishoku.NewBuilder2[Position, Velocity](world)
+	builder.NewEntitiesWith(100, Position{X: 0, Y: 0}, Velocity{VX: 1.0, VY: 0.5})
 
-	// Create 100 entities in a batch.
-	builder.NewEntities(100)
+	// Spawn a single initialized entity and inspect it.
+	hero := builder.NewEntityWith(Position{X: 10, Y: 20}, Velocity{VX: 2.0, VY: -1.0})
 
-	// 4. Initialize Components with a Filter
-	// Use a Filter (or "query") to iterate over entities and initialize them.
-	initQuery := teishoku.NewFilter2[Position, Velocity](&world)
-	i := 0
-	for initQuery.Next() {
-		pos, vel := initQuery.Get()
-		pos.X = float32(i) * 2.0
-		pos.Y = 0
-		vel.VX = 1.0
-		vel.VY = 0.5
-		i++
+	// 3. Query with a Filter (supports optional Without exclusions).
+	movement := teishoku.Without[Static](
+		teishoku.NewFilter2[Position, Velocity](world),
+	)
+
+	// Ultra-fast bulk slice iteration (~0.73 ns/entity, 0 allocs):
+	for range 5 {
+		movement.EachChunk(func(pos []Position, vel []Velocity) {
+			for i := range pos {
+				pos[i].X += vel[i].VX
+				pos[i].Y += vel[i].VY
+			}
+		})
 	}
 
-	// 5. Create a System to Update Entities
-	// A system is a loop that uses a Filter to update component data.
-	movementSystem := teishoku.NewFilter2[Position, Velocity](&world)
-	for i := 0; i < 5; i++ { // Simulate 5 frames
-		// When reusing a filter, you must call Reset() before each iteration.
-		movementSystem.Reset()
-		for movementSystem.Next() {
-			pos, vel := movementSystem.Get()
-			pos.X += vel.VX
-			pos.Y += vel.VY
-		}
+	// Or row-by-row iteration (supports nested queries, 0 allocs):
+	q := movement.Query()
+	for q.Next() {
+		pos, vel := q.Get()
+		pos.X += vel.VX
+		pos.Y += vel.VY
 	}
-    
-    // 6. Verify the result (optional)
-    resultQuery := teishoku.NewFilter2[Position, Velocity](&world)
-    allEntities := resultQuery.Entities()
-    if len(allEntities) > 10 {
-        entityToInspect := allEntities[10]
-        finalPos := teishoku.GetComponent[Position](&world, entityToInspect)
-        fmt.Printf("Entity 10's final position: %+v\n", *finalPos)
-    }
+
+	// 4. Direct component access via Builder or 1-component helpers.
+	heroPos, _ := builder.Get(hero)
+	fmt.Printf("Hero final position: %+v\n", *heroPos)
 }
 ```
 
+---
+
+## API Reference
+
+### World
+
+| Function / Method | Description |
+| :--- | :--- |
+| `NewWorld(initialCapacity ...int) *World` | Creates a new `World` with an optional entity capacity hint (default `1024`). |
+| `ComponentID[T any](w *World) uint8` | Returns (and registers if needed) the component type ID for `T`. |
+| `(w *World) CreateEntity() Entity` | Creates an empty entity. |
+| `(w *World) CreateEntities(count int)` | Creates `count` empty entities in a batch. |
+| `(w *World) RemoveEntity(e Entity)` | Removes an entity and recycles its ID. |
+| `(w *World) RemoveEntities(ents []Entity)` | Removes a slice of entities in a batch. |
+| `(w *World) ClearEntities()` | Removes all entities while preserving allocated archetype capacity. |
+| `(w *World) IsValid(e Entity) bool` | Reports whether `e` is currently alive. |
+| `(w *World) Len() int` | Returns the number of living entities. |
+| `(w *World) Resources() *Resources` | Returns the world's `Resources` container. |
+
+### Builders (`Builder` .. `Builder8`)
+
+Unified, pre-cached handles for spawning, reading, updating, and removing sets of 1 to 8 components (`NewBuilder`, `NewBuilder2` .. `NewBuilder8`).
+
+| Method | Description |
+| :--- | :--- |
+| `NewEntity() Entity` | Spawns one zero-initialized entity in the builder's archetype. |
+| `NewEntityWith(v1, ...) Entity` | Spawns one entity and initializes its components in a single step. |
+| `NewEntities(count int)` | Batch-spawns `count` zero-initialized entities. |
+| `NewEntitiesWith(count int, v1, ...)` | Batch-spawns `count` entities initialized to `v1, ...`. |
+| `Get(e Entity) (*T1, ...)` | Returns pointers to the components, or `nil`s if invalid/missing. |
+| `Has(e Entity) bool` | Reports whether `e` is alive and possesses all builder components. |
+| `Set(e Entity, v1, ...)` | Updates components in-place, or migrates `e` via inline-cached copy-plan. |
+| `SetBatch(ents []Entity, v1, ...)` | Batch `Set` across a slice of entities. |
+| `Remove(e Entity)` | Removes the builder's components from `e` via inline-cached copy-plan. |
+| `RemoveBatch(ents []Entity)` | Batch `Remove` across a slice of entities. |
+
+### Single-Component Helpers & Swapper
+
+| Function / Type | Description |
+| :--- | :--- |
+| `GetComponent[T](w, e) *T` | Convenience single-component lookup. |
+| `HasComponent[T](w, e) bool` | Convenience single-component presence check. |
+| `SetComponent[T](w, e, val)` | Convenience single-component add/update. |
+| `RemoveComponent[T](w, e)` | Convenience single-component removal. |
+| `NewSwapper[RemT, AddT](w)` | Replaces `RemT` with `AddT` in a single archetype transition (`Swap`, `SwapBatch`). |
+
+### Filters & Queries (`Filter0`, `Filter` .. `Filter8`)
+
+| Method / Function | Description |
+| :--- | :--- |
+| `NewFilter[T](w)` / `NewFilter2..8(w)` | Creates an incrementally synced filter for 1 to 8 components (`NewFilter0` for empty entities). |
+| `Without[T](filter)` / `filter.Without(ids...)` | Excludes entities possessing the given component(s) at zero iteration cost. |
+| `filter.EachChunk(func([]T1, ...))` | Invokes callback once per non-empty matching archetype with direct typed slices. |
+| `filter.Chunks()` | Returns a `Chunks` cursor (`Next()`, `Get()`, `Entities()`) for slice-level iteration with early `break`. |
+| `filter.Query()` | Returns a stack-allocated `Query` cursor (`Next()`, `Get()`, `Entity()`) supporting nested iteration. |
+| `filter.Count() int` | Returns the total number of matching entities. |
+| `filter.Entities() []Entity` | Returns a lazily cached slice of all matching entities. |
+| `filter.RemoveEntities()` | Bulk-destroys all matching entities in O(N) without swap-remove copies. |
+
+### Resources & EventBus
+
+- **Resources**: `NewResources(cap...)`, `AddResource[T]`, `HasResource[T]`, `GetResource[T]`, `RemoveResource[T]`, `Clear()`, and zero-lookup cached `UseResource[T](r)` -> `ResourceHandle[T]` (`Get`, `Has`, `Add`).
+- **EventBus**: `NewEventBus(handlerCap...)`, `Clear()`, typed `Subscribe[T]`, `Publish[T]`, and zero-lookup `NewEventChannel[T](bus)` -> `EventChannel[T]` (`Subscribe`, `Publish`).
+
+### Concurrency Model
+
+Like other high-performance archetype ECS engines, `World`, `Resources`, and `EventBus` are designed for **single-threaded mutations** (lock-free hot paths). Concurrent read-only `Query`/`Chunks`/`EachChunk` iterations are safe as long as no structural mutations occur simultaneously.
+
+---
+
 ## Code Generation
 
-`Teishoku` uses Go's `go generate` tool to create boilerplate code for multi-component `Builders`, `Filters`, and `World` API functions (e.g., `NewBuilder3`, `Filter4`, `GetComponent2`). This approach keeps the library's public API clean and consistent without requiring developers to write repetitive code manually.
-
-To run the code generator, simply execute the following command from the root of the repository:
+Multi-component `Builder` and `Filter`/`Query`/`Chunks` implementations (arities 1 to 8) are generated from templates in `templates/`:
 
 ```bash
 go generate ./...
 ```
 
-This will regenerate the `*_generated.go` files. You should run this command whenever you change the templates in the `templates/` directory.
+---
 
-## API Reference
+## Benchmarks
 
-The following tables provide a summary of the core API. For complete and up-to-date documentation, please refer to the **GoDoc comments in the source code**, which serve as the official API reference.
+Run the native benchmark suite locally:
 
-### World
+```bash
+go test -bench=. -benchmem -run=^$ .
+```
 
-| Function                            | Description                                                       |
-| ----------------------------------- | ----------------------------------------------------------------- |
-| `NewWorld(capacity int) *World`     | Creates a new `World` with a pre-allocated entity capacity.       |
-| `(w *World) RemoveEntity(e Entity)` | Deactivates an entity and recycles its ID for future use.         |
-| `(w *World) IsValid(e Entity) bool` | Checks if an entity reference is still valid (i.e., not deleted). |
-| `(w *World).Resources() *Resources` | Retrieves the `Resources` manager for storing global data.        |
+The tables below show the `/1K` suite (`go test -bench=/1K -benchtime=200ms -benchmem -run=^$ .`), measured on `11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz` (`windows/amd64`, Go `1.27.4`). Only `BenchmarkCreateWorld` and `BenchmarkAutoExpand` perform heap allocations; every other benchmark runs at **`0 B/op, 0 allocs/op`**.
 
-### Component Management
+> **Note on batch vs. single-op measurements:** Most `/1K` benchmarks measure a **1,000-entity** or **1,000-op batch** per `b.N` iteration (e.g., creating, updating, querying, or publishing 1,000 items). Benchmarks that perform a **single op** per `b.N` iteration are explicitly noted below (`CreateWorld`, `FilterGetEntitiesCached`, `PublishManyHandlers` across 1,000 subscribers, and `ResourcesClear` / `FilterRemoveEntities` / `WorldClearEntities` single-call batch operations).
 
-Functions are provided for up to 6 components (`GetComponent`, `GetComponent2`, etc.).
+### Entity, World, Builder, Filter, Functions & Swapper
 
-| Function                                     | Description                                                          |
-| -------------------------------------------- | -------------------------------------------------------------------- |
-| `GetComponent[T](w *World, e Entity) *T`     | Retrieves a pointer to a single component `T` for an entity.         |
-| `SetComponent[T](w *World, e Entity, val T)` | Adds or updates a component. May move the entity to a new archetype. |
-| `RemoveComponent[T](w *World, e Entity)`     | Removes a component. May move the entity to a new archetype.         |
-
-### Builders (Entity Creation)
-
-Builders are available for creating entities with 1 to 6 components (`NewBuilder`, `NewBuilder2`, etc.).
-
-| Function                                       | Description                                                             |
-| ---------------------------------------------- | ----------------------------------------------------------------------- |
-| `NewBuilder[T](w *World) *Builder[T]`          | Creates a `Builder` for entities with a specific set of components.     |
-| `(b *Builder[T]) NewEntity() Entity`           | Creates a single new entity with the pre-configured components.         |
-| `(b *Builder[T]) NewEntities(count int)`       | Creates a batch of `count` entities with the pre-configured components. |
-| `(b *Builder[T]) Get(e Entity) *T`             | Gets the component(s) for an entity created by this builder.            |
-| `(b *Builder[T]) Set(e Entity, comp T)`        | Sets the component(s) for an entity.                                    |
-| `(b *Builder[T]) SetBatch(e []Entity, comp T)` | Sets the component(s) for entities.                                     |
-
-### Filters (Querying)
-
-Filters are available for iterating over entities with 1 to 6 components (`NewFilter`, `NewFilter2`, etc.).
-
-| Function                             | Description                                                                 |
-| ------------------------------------ | --------------------------------------------------------------------------- |
-| `NewFilter[T](w *World) *Filter[T]`  | Creates a `Filter` to iterate over entities with a set of components.       |
-| `(f *Filter[T]) Next() bool`         | Advances the iterator to the next entity. Returns `false` if none are left. |
-| `(f *Filter[T]) Entity() Entity`     | Returns the current `Entity` in the iteration.                              |
-| `(f *Filter[T]) Get() *T`            | Returns the component(s) for the current entity.                            |
-| `(f *Filter[T]) Reset()`             | Resets the iterator to the beginning.                                       |
-| `(f *Filter[T]) RemoveEntities()`    | Efficiently removes all entities matching the filter.                       |
-| `(f *Filter[T]) Entities() []Entity` | Returns the entities matching the filter.                                   |
+| Benchmark | ns/op | B/op | allocs/op |
+| :--- | ---: | ---: | ---: |
+| `BenchmarkCreateWorld/1K` *(single op, cap 1,000)* | 5,609 | 36,864 | 6 |
+| `BenchmarkAutoExpand/1K_init_x2` *(2,000-op expansion)* | 21,792 | 98,328 | 5 |
+| `BenchmarkWorldCreateEntity/1K` *(1,000-op batch)* | 4,935 | 0 | 0 |
+| `BenchmarkWorldCreateEntities/1K` *(1,000-entity batch)* | 2,925 | 0 | 0 |
+| `BenchmarkBuilderNewEntity/1K` *(1,000-op batch)* | 5,420 | 0 | 0 |
+| `BenchmarkBuilderNewEntityWith/1K` *(1,000-op batch)* | 7,279 | 0 | 0 |
+| `BenchmarkBuilderNewEntities/1K` *(1,000-entity batch)* | 2,953 | 0 | 0 |
+| `BenchmarkBuilderNewEntitiesWith/1K` *(1,000-entity batch)* | 3,539 | 0 | 0 |
+| `BenchmarkBuilderNewEntitiesWith2/1K` *(1,000-entity batch)* | 4,000 | 0 | 0 |
+| `BenchmarkBuilderSetComponent/1K` *(1,000-op batch)* | 11,080 | 0 | 0 |
+| `BenchmarkBuilderSetComponent2/1K` *(1,000-op batch)* | 12,603 | 0 | 0 |
+| `BenchmarkBuilderRemove/1K` *(1,000-op batch)* | 17,984 | 0 | 0 |
+| `BenchmarkBuilderGetComponent/1K` *(1,000-op batch)* | 2,298 | 0 | 0 |
+| `BenchmarkBuilderGetComponent2/1K` *(1,000-op batch)* | 3,688 | 0 | 0 |
+| `BenchmarkFunctionsGetComponent/1K` *(1,000-op batch)* | 16,238 | 0 | 0 |
+| `BenchmarkFunctionsSetComponentExisting/1K` *(1,000-op batch)* | 16,512 | 0 | 0 |
+| `BenchmarkFunctionsSetComponentNew/1K` *(1,000-op batch)* | 35,445 | 0 | 0 |
+| `BenchmarkFunctionsRemoveComponent/1K` *(1,000-op batch)* | 35,487 | 0 | 0 |
+| `BenchmarkSwapperSwap/1K` *(1,000-op batch)* | 18,526 | 0 | 0 |
+| `BenchmarkWorldRemoveEntity/1K` *(1,000-op batch)* | 8,660 | 0 | 0 |
+| `BenchmarkWorldRemoveEntities/1K` *(1,000-entity batch)* | 7,475 | 0 | 0 |
+| `BenchmarkWorldClearEntities/1K` *(single call, 1,000 entities)* | 1,777 | 0 | 0 |
+| `BenchmarkFilterRemoveEntities/1K` *(single call, 1,000 entities)* | 1,824 | 0 | 0 |
+| `BenchmarkFilter2RemoveEntities/1K` *(single call, 1,000 entities)* | 1,949 | 0 | 0 |
+| `BenchmarkFilterIterate/1K` *(1,000-entity batch)* | 2,280 | 0 | 0 |
+| `BenchmarkFilter2Iterate/1K` *(1,000-entity batch)* | 2,897 | 0 | 0 |
+| `BenchmarkFilter2EachChunk/1K` *(1,000-entity batch)* | 890.3 | 0 | 0 |
+| `BenchmarkFilter2Chunks/1K` *(1,000-entity batch)* | 1,536 | 0 | 0 |
+| `BenchmarkFilter3Iterate/1K` *(1,000-entity batch)* | 2,734 | 0 | 0 |
+| `BenchmarkFilter4Iterate/1K` *(1,000-entity batch)* | 3,181 | 0 | 0 |
+| `BenchmarkFilter5Iterate/1K` *(1,000-entity batch)* | 4,023 | 0 | 0 |
+| `BenchmarkFilter6Iterate/1K` *(1,000-entity batch)* | 3,721 | 0 | 0 |
+| `BenchmarkFilterGetEntitiesCached/1K` *(single op, 1,000 entities)* | 2.437 | 0 | 0 |
+| `BenchmarkFilterGetEntitiesUncached/1K` *(single call, 1,000 entities)* | 527.4 | 0 | 0 |
 
 ### EventBus
 
-| Function                                           | Description                                          |
-| -------------------------------------------------- | ---------------------------------------------------- |
-| `Subscribe[T any](bus *EventBus, handler func(T))` | Registers a handler for events of type T.            |
-| `Publish[T any](bus *EventBus, event T)`           | Sends an event of type T to all subscribed handlers. |
+| Benchmark | ns/op | B/op | allocs/op |
+| :--- | ---: | ---: | ---: |
+| `BenchmarkEventBusSubscribe/1K` *(1,000-op batch)* | 21,618 | 0 | 0 |
+| `BenchmarkEventBusPublishNoHandlers/1K` *(1,000-op batch)* | 1,594 | 0 | 0 |
+| `BenchmarkEventBusPublishOneHandler/1K` *(1,000-op batch)* | 19,379 | 0 | 0 |
+| `BenchmarkEventBusPublishManyHandlers/1K` *(single op, 1,000 handlers)* | 1,725 | 0 | 0 |
+| `BenchmarkEventChannelPublishOneHandler/1K` *(1,000-op batch)* | 2,481 | 0 | 0 |
+| `BenchmarkEventChannelPublishManyHandlers/1K` *(single op, 1,000 handlers)* | 1,771 | 0 | 0 |
 
 ### Resources
 
-| Function                                       | Description                                    |
-| ---------------------------------------------- | ---------------------------------------------- |
-| `(r *Resources) Add(res any) int`              | Adds a resource and returns its ID.            |
-| `(r *Resources) Has(id int) bool`              | Checks if a resource with the given ID exists. |
-| `(r *Resources) Get(id int) any`               | Retrieves the resource by ID.                  |
-| `(r *Resources) Remove(id int)`                | Removes the resource by ID.                    |
-| `(r *Resources) Clear()`                       | Removes all resources.                         |
-| `HasResource[T any](r *Resources) (bool, int)` | Checks if a resource of type T exists.         |
-| `GetResource[T any](r *Resources) (*T, int)`   | Retrieves the resource of type T.              |
+| Benchmark | ns/op | B/op | allocs/op |
+| :--- | ---: | ---: | ---: |
+| `BenchmarkResourcesAdd/1K` *(1,000-op batch)* | 42,398 | 0 | 0 |
+| `BenchmarkResourcesHas/1K` *(1,000-op batch)* | 777.8 | 0 | 0 |
+| `BenchmarkResourcesGet/1K` *(1,000-op batch)* | 740.1 | 0 | 0 |
+| `BenchmarkResourceHandleGet/1K` *(1,000-op batch)* | 859.7 | 0 | 0 |
+| `BenchmarkResourcesRemove/1K` *(1,000-op batch)* | 32,615 | 0 | 0 |
+| `BenchmarkResourcesClear/1K` *(single call, 1,000 resources)* | 7,297 | 0 | 0 |
 
-## Concurrency
-
-The `World` object and the `Resources` manager are thread-safe. However, the `EventBus` is **not** thread-safe and should not be accessed from multiple goroutines concurrently without external synchronization.
-
-## Benchmark Results
-
-The following tables summarize the performance of `teishoku` across a range of common operations. The results are presented in nanoseconds (ns) and were run on an AMD EPYC 7763 64-Core Processor. For batch operations, the `ns/op` is presented on a per-entity basis.
-
-Notably, many core operations like creating entities, accessing components, and iterating with filters show **zero memory allocations** (`0 allocs/op`), making `teishoku` ideal for performance-critical applications where garbage collection pressure is a concern.
-
-### Entity Benchmark
-
-*Notes: ns/op is per-entity*
-
-| Action Name | Entities | ns/op | B/op | allocs/op |
-| :--- | :--- | :--- | :--- | :--- |
-| **Create World** | 1K | 9.917 | 49848 | 13 |
-| | 10K | 7.049 | 381626 | 13 |
-| | 100K | 6.298 | 3617473 | 13 |
-| | 1M | 4.370 | 36025028 | 13 |
-| **Auto Expand** | 1K | 54.435 | 143384 | 7 |
-| | 10K | 58.295 | 1269786 | 7 |
-| | 100K | 45.259 | 13508661 | 7 |
-| | 1M | 40.643 | 134651935 | 7 |
-| **World: Create Entity** | 1K | 40.366 | 0 | 0 |
-| | 10K | 35.297 | 0 | 0 |
-| | 100K | 35.366 | 0 | 0 |
-| | 1M | 33.623 | 0 | 0 |
-| **World: Create Entities (Batch)** | 1K | 3.009 | 0 | 0 |
-| | 10K | 2.632 | 0 | 0 |
-| | 100K | 2.341 | 0 | 0 |
-| | 1M | 2.462 | 0 | 0 |
-| **Builder: New Entity** | 1K | 18.620 | 0 | 0 |
-| | 10K | 17.874 | 2 | 0 |
-| | 100K | 15.588 | 12 | 0 |
-| | 1M | 14.534 | 0 | 0 |
-| **Builder: New Entities (Batch)** | 1K | 2.889 | 0 | 0 |
-| | 10K | 2.721 | 0 | 0 |
-| | 100K | 2.833 | 0 | 0 |
-| | 1M | 2.449 | 0 | 0 |
-| **Builder: New Entities w/ Value Set (Batch)** | 1K | 4.724 | 0 | 0 |
-| | 10K | 4.807 | 1 | 0 |
-| | 100K | 4.422 | 0 | 0 |
-| | 1M | 4.118 | 0 | 0 |
-| **Builder: New Entities w/ Value Set 2 (Batch)** | 1K | 6.408 | 0 | 0 |
-| | 10K | 6.516 | 1 | 0 |
-| | 100K | 6.707 | 12 | 0 |
-| | 1M | 5.527 | 0 | 0 |
-| **Builder: Set Component** | 1K | 57.795 | 0 | 0 |
-| | 10K | 56.678 | 0 | 0 |
-| | 100K | 55.559 | 10 | 0 |
-| | 1M | 53.948 | 0 | 0 |
-| **Builder: Set Component 2** | 1K | 67.170 | 0 | 0 |
-| | 10K | 66.665 | 3 | 0 |
-| | 100K | 63.926 | 0 | 0 |
-| | 1M | 63.424 | 0 | 0 |
-| **Builder: Get Component** | 1K | 8.424 | 0 | 0 |
-| | 10K | 8.543 | 0 | 0 |
-| **Filter & Iterate** | 1K | 0.953 | 0 | 0 |
-| | 10K | 0.936 | 0 | 0 |
-| | 100K | 0.933 | 0 | 0 |
-| | 1M | 0.935 | 0 | 0 |
-| **Filter & Iterate (2 components)** | 1K | 0.955 | 0 | 0 |
-| | 10K | 0.936 | 0 | 0 |
-| | 100K | 0.933 | 0 | 0 |
-| | 1M | 0.934 | 0 | 0 |
-| **Filter & Iterate (3 components)** | 1K | 0.975 | 0 | 0 |
-| | 10K | 0.939 | 0 | 0 |
-| | 100K | 0.935 | 0 | 0 |
-| | 1M | 0.936 | 0 | 0 |
-| **Filter & Iterate (4 components)** | 1K | 0.954 | 0 | 0 |
-| | 10K | 0.936 | 0 | 0 |
-| | 100K | 0.936 | 0 | 0 |
-| | 1M | 0.935 | 0 | 0 |
-| **Filter & Iterate (5 components)** | 1K | 0.953 | 0 | 0 |
-| | 10K | 0.936 | 0 | 0 |
-| | 100K | 0.935 | 0 | 0 |
-| | 1M | 0.934 | 0 | 0 |
-| **Filter & Iterate (6 components)** | 1K | 0.953 | 0 | 0 |
-| | 10K | 0.936 | 0 | 0 |
-| | 100K | 0.935 | 0 | 0 |
-| | 1M | 0.934 | 0 | 0 |
-| **Filter: Get Entities (Cached)** | 1K | 7.512 | 0 | 0 |
-| | 10K | 7.507 | 0 | 0 |
-| | 100K | 7.514 | 0 | 0 |
-| | 1M | 7.501 | 0 | 0 |
-| **Filter: Get Entities (Uncached)** | 1K | 411.3 | 0 | 0 |
-| | 10K | 2416 | 0 | 0 |
-| | 100K | 34316 | 0 | 0 |
-| | 1M | 384441 | 0 | 0 |
-| **Functions: Set Component (Existing)** | 1K | 96.09 | 0 | 0 |
-| | 10K | 96.52 | 0 | 0 |
-| | 100K | 99.31 | 0 | 0 |
-| | 1M | 100.6 | 0 | 0 |
-| **Functions: Set Component (New)** | 1K | 161.205 | 0 | 0 |
-| | 10K | 169.717 | 0 | 0 |
-| | 100K | 156.848 | 0 | 0 |
-| | 1M | 156.759 | 0 | 0 |
-| **Functions: Remove Component** | 1K | 162.390 | 0 | 0 |
-| | 10K | 169.940 | 0 | 0 |
-| | 100K | 158.516 | 0 | 0 |
-| | 1M | 157.510 | 0 | 0 |
-| **World: Remove Entity** | 1K | 68.376 | 0 | 0 |
-| | 10K | 79.215 | 1 | 0 |
-| | 100K | 80.864 | 1 | 0 |
-| | 1M | 99.023 | 0 | 0 |
-| **World: Remove Entities (Batch)** | 1K | 68.483 | 0 | 0 |
-| | 10K | 81.170 | 1 | 0 |
-| | 100K | 72.851 | 0 | 0 |
-| | 1M | 68.656 | 0 | 0 |
-| **World: Clear Entities** | 1K | 3.601 | 0 | 0 |
-| | 10K | 3.424 | 0 | 0 |
-| | 100K | 4.822 | 0 | 0 |
-| | 1M | 5.119 | 0 | 0 |
-
-### Event Bus Benchmark
-
-| Action Name | Handlers | ns/op | B/op | allocs/op |
-| :--- | :--- | :--- | :--- | :--- |
-| **Subscribe** | 1K | 0.0000533 | 0 | 0 |
-| | 10K | 0.0002618 | 0 | 0 |
-| | 100K | 0.005772 | 0 | 0 |
-| | 1M | 0.06385 | 0 | 0 |
-| **Publish (No Handlers)** | 1K | 0.0000088 | 0 | 0 |
-| | 10K | 0.0000961 | 0 | 0 |
-| | 100K | 0.0009734 | 0 | 0 |
-| | 1M | 0.008387 | 0 | 0 |
-| **Publish (One Handler)** | 1K | 0.0000271 | 0 | 0 |
-| | 10K | 0.0001824 | 0 | 0 |
-| | 100K | 0.001911 | 0 | 0 |
-| | 1M | 0.01867 | 0 | 0 |
-| **Publish (Many Handlers)** | 1K | 1890 | 0 | 0 |
-| | 10K | 18697 | 0 | 0 |
-| | 100K | 188506 | 0 | 0 |
-| | 1M | 1897631 | 0 | 0 |
-
-### Resources Benchmark
-
-| Action Name | Resources | ns/op | B/op | allocs/op |
-| :--- | :--- | :--- | :--- | :--- |
-| **Add** | 1K | 0.0001176 | 0 | 0 |
-| | 10K | 0.001122 | 0 | 0 |
-| | 100K | 0.01192 | 0 | 0 |
-| | 1M | 0.2008 | 0 | 0 |
-| **Has** | 1K | 0.0000100 | 0 | 0 |
-| | 10K | 0.0000609 | 0 | 0 |
-| | 100K | 0.0005573 | 0 | 0 |
-| | 1M | 0.005779 | 0 | 0 |
-| **Get** | 1K | 0.0000065 | 0 | 0 |
-| | 10K | 0.0000739 | 0 | 0 |
-| | 100K | 0.0006336 | 0 | 0 |
-| | 1M | 0.006237 | 0 | 0 |
-| **Remove** | 1K | 0.0000697 | 0 | 0 |
-| | 10K | 0.0005709 | 0 | 0 |
-| | 100K | 0.006688 | 0 | 0 |
-| | 1M | 0.1681 | 0 | 0 |
-| **Clear** | 1K | 15769 | 0 | 0 |
-| | 10K | 141010 | 0 | 0 |
-| | 100K | 1386929 | 0 | 0 |
-| | 1M | 23580516 | 0 | 0 |
-
-<details>
-<summary>Click to view raw benchmark output</summary>
-
-```plaintext
-goos: linux
-goarch: amd64
-pkg: github.com/edwinsyarief/teishoku
-cpu: AMD EPYC 7763 64-Core Processor
-BenchmarkCreateWorld/1K-4                      113096          9917 ns/op        49848 B/op          13 allocs/op
-BenchmarkCreateWorld/10K-4                      16908         70488 ns/op       381626 B/op          13 allocs/op
-BenchmarkCreateWorld/100K-4                      2374        629840 ns/op      3617473 B/op          13 allocs/op
-BenchmarkCreateWorld/1M-4                         272       4369555 ns/op     36025028 B/op          13 allocs/op
-BenchmarkAutoExpand/1K_init_x2-4                22147         54435 ns/op       143384 B/op           7 allocs/op
-BenchmarkAutoExpand/10K_init_x2-4                2034        582947 ns/op      1269786 B/op           7 allocs/op
-BenchmarkAutoExpand/100K_init_x2-4                241       4525902 ns/op     13508661 B/op           7 allocs/op
-BenchmarkAutoExpand/1000K_init_x2-4                25      40643101 ns/op    134651935 B/op           7 allocs/op
-BenchmarkWorldCreateEntity/1K-4                 29593         40366 ns/op            0 B/op           0 allocs/op
-BenchmarkWorldCreateEntity/10K-4                 3470        352969 ns/op            0 B/op           0 allocs/op
-BenchmarkWorldCreateEntity/100K-4                 352       3536612 ns/op            0 B/op           0 allocs/op
-BenchmarkWorldCreateEntity/1M-4                    36      33623122 ns/op            0 B/op           0 allocs/op
-BenchmarkWorldCreateEntities/1K-4              397861          3009 ns/op            0 B/op           0 allocs/op
-BenchmarkWorldCreateEntities/10K-4              45781         26321 ns/op            0 B/op           0 allocs/op
-BenchmarkWorldCreateEntities/100K-4              5116        234125 ns/op            0 B/op           0 allocs/op
-BenchmarkWorldCreateEntities/1M-4                 489       2462145 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntity/1K-4                  63282         18620 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntity/10K-4                  7418        178736 ns/op            2 B/op           0 allocs/op
-BenchmarkBuilderNewEntity/100K-4                  764       1558767 ns/op           12 B/op           0 allocs/op
-BenchmarkBuilderNewEntity/1M-4                     81      14534337 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntities/1K-4               410301          2889 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntities/10K-4               44179         27209 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntities/100K-4               3710        283295 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntities/1M-4                  498       2449114 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet/1K-4   252379          4724 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet/10K-4   25288         48071 ns/op            1 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet/100K-4   2820        442229 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet/1M-4      291       4117529 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet2/1K-4  188880          6408 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet2/10K-4  18366         65159 ns/op            1 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet2/100K-4  1785        670657 ns/op           12 B/op           0 allocs/op
-BenchmarkBuilderNewEntitiesWithValueSet2/1M-4     216       5526794 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderSetComponent/1K-4               20775         57795 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderSetComponent/10K-4               2108        566780 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderSetComponent/100K-4               210       5555934 ns/op           10 B/op           0 allocs/op
-BenchmarkBuilderSetComponent/1M-4                  21      53948158 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderSetComponent2/1K-4              17824         67170 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderSetComponent2/10K-4              1821        666647 ns/op            3 B/op           0 allocs/op
-BenchmarkBuilderSetComponent2/100K-4              187       6392592 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderSetComponent2/1M-4                 18      63424222 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderGetComponent/1K-4              142381077         8.424 ns/op            0 B/op           0 allocs/op
-BenchmarkBuilderGetComponent/10K-4             140378828         8.543 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter2Iterate/1K-4                   1260806         952.8 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter2Iterate/10K-4                   127950          9356 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter2Iterate/100K-4                  12830         93304 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter2Iterate/1M-4                     1284        935081 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter3Iterate/1K-4                   1259912         954.5 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter3Iterate/10K-4                   128036          9358 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter3Iterate/100K-4                  12849         93322 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter3Iterate/1M-4                     1280        934063 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter4Iterate/1K-4                   1230201         975.1 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter4Iterate/10K-4                   127768          9387 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter4Iterate/100K-4                  12852         93513 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter4Iterate/1M-4                     1282        935502 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter5Iterate/1K-4                   1258552         953.9 ns/op            0 B/op           0 allocs.
-BenchmarkFilter5Iterate/10K-4                   128028          9355 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter5Iterate/100K-4                  12862         93623 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter5Iterate/1M-4                     1286        934623 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter6Iterate/1K-4                   1261116         952.7 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter6Iterate/10K-4                   128180          9362 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter6Iterate/100K-4                  12831         93507 ns/op            0 B/op           0 allocs/op
-BenchmarkFilter6Iterate/1M-4                     1281        933519 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesCached/1K-4          159448855         7.512 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesCached/10K-4         160041580         7.507 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesCached/100K-4        159234398         7.514 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesCached/1M-4          159619701         7.501 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesUncached/1K-4        2840005         411.3 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesUncached/10K-4        538636          2416 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesUncached/100K-4        33975         34316 ns/op            0 B/op           0 allocs/op
-BenchmarkFilterGetEntitiesUncached/1M-4           2859        384441 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusSubscribe/1K-4                1000000000         0.0000533 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusSubscribe/10K-4               1000000000         0.0002618 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusSubscribe/100K-4              1000000000         0.005772 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusSubscribe/1M-4                1000000000         0.06385 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishNoHandlers/1K-4        1000000000         0.0000088 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishNoHandlers/10K-4       1000000000         0.0000961 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishNoHandlers/100K-4      1000000000         0.0009734 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishNoHandlers/1M-4        1000000000         0.008387 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishOneHandler/1K-4        1000000000         0.0000271 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishOneHandler/10K-4       1000000000         0.0001824 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishOneHandler/100K-4      1000000000         0.001911 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishOneHandler/1M-4        1000000000         0.01867 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishManyHandlers/1K-4        634951          1890 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishManyHandlers/10K-4        64209         18697 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishManyHandlers/100K-4       6370        188506 ns/op            0 B/op           0 allocs/op
-BenchmarkEventBusPublishManyHandlers/1M-4          633       1897631 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesAdd/1K-4                     1000000000         0.0001176 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesAdd/10K-4                    1000000000         0.001122 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesAdd/100K-4                   1000000000         0.01192 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesAdd/1M-4                     1000000000         0.2008 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesHas/1K-4                     1000000000         0.0000100 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesHas/10K-4                    1000000000         0.0000609 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesHas/100K-4                   1000000000         0.0005573 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesHas/1M-4                     1000000000         0.005779 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesGet/1K-4                     1000000000         0.0000065 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesGet/10K-4                    1000000000         0.0000739 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesGet/100K-4                   1000000000         0.0006336 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesGet/1M-4                     1000000000         0.006237 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesRemove/1K-4                  1000000000         0.0000697 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesRemove/10K-4                 1000000000         0.0005709 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesRemove/100K-4                1000000000         0.006688 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesRemove/1M-4                  1000000000         0.1681 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesClear/1K-4                       77509         15769 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesClear/10K-4                      10000        141010 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesClear/100K-4                       832       1386929 ns/op            0 B/op           0 allocs/op
-BenchmarkResourcesClear/1M-4                         100      23580516 ns/op            0 B/op           0 allocs/op
-PASS
-ok      github.com/edwinsyarief/teishoku    881.890s
-```
-
-</details>
+---
 
 ## License
 
